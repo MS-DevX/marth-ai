@@ -9,12 +9,14 @@ library.
 
 ## Status
 
-Phase 2 is done. The agent can read files and list directories: it sends
-your task to the model, the model asks for a tool, the agent runs it, and
-the result goes back for a final answer.
+Phase 3 is done. The agent runs a real loop: it sends your task, runs
+whatever tools the model asks for, feeds the results back, and keeps going
+until the model answers. It stops on its own when the model is done, when
+the model starts repeating itself, or when it hits the step limit — and it
+says which one happened.
 
-Currently available: `list_files`, `read_file`. Write tools, the full
-loop, and confirmations come later — see [Roadmap](#roadmap).
+Currently available: `list_files`, `read_file` (with line ranges). Write
+tools and confirmations come in Phase 4 — see [Roadmap](#roadmap).
 
 ## Setup
 
@@ -111,6 +113,8 @@ environment variables (see `.env.example`):
 | `AGENT_PROVIDER` | `gemini` | `gemini` or `openai` (Ollama/Groq/etc) |
 | `AGENT_MODEL` | per provider | Model name |
 | `AGENT_MAX_STEPS` | `20` | Max loop iterations |
+| `AGENT_MAX_HISTORY_CHARS` | `24000` | Ceiling on the whole conversation |
+| `AGENT_MAX_REPEATED_CALLS` | `3` | Identical tool calls before giving up |
 | `AGENT_COMMAND_TIMEOUT` | `30` | Seconds before a shell command is killed |
 | `AGENT_MAX_OUTPUT_CHARS` | `4000` | Tool output truncation limit |
 | `AGENT_MAX_FILE_BYTES` | `512000` | `read_file` refuses anything larger |
@@ -172,35 +176,98 @@ marth-ai/
     test_tools.py
     test_safety.py
     test_llm.py
+    test_loop.py
 ```
 
 ## Roadmap
 
 - [x] Phase 1 — scaffold, config, one-shot Gemini call
 - [x] Phase 2 — `read_file` + `list_files` and one tool round trip
-- [ ] Phase 3 — the full agent loop
-- [ ] Phase 4 — `write_file`, `edit_file`, `grep`, `run_command` + safety
-- [ ] Phase 5 — tests, system prompt, usage docs
+- [x] Phase 3 — the full agent loop
+- [ ] Phase 4 — `write_file`, `edit_file`, `grep`, `run_command` + confirmations
+- [ ] Phase 5 — system prompt, usage docs, wider test coverage
+
+## The loop
+
+One step is: send the conversation, run whatever tools were asked for,
+send again. It is written out longhand in `loop.py` rather than handed to
+a framework, because the loop *is* the project.
+
+```python
+for step in range(1, config.MAX_STEPS + 1):
+    response = llm.send(compact_history(history), tool_schemas=TOOL_SCHEMAS)
+    if not response.tool_calls:
+        return response.text          # finished
+    history.append(model_turn)
+    history.append(tool_turn)
+```
+
+It stops in three situations, and says which one happened, because "the
+agent finished" and "the agent gave up" look identical otherwise:
+
+| Stop | Cause |
+| --- | --- |
+| Answered | The model replied with prose and no tool calls |
+| Repeating | The same call, with the same arguments, `MAX_REPEATED_CALLS` times |
+| Step limit | `MAX_STEPS` reached without a final answer |
+
+Repeat detection sorts the arguments, so a model cannot loop forever just
+by reshuffling its keys. On a CPU that matters: each wasted step is real
+minutes.
+
+### Keeping the conversation small
+
+The whole conversation is re-sent every step, so it has to stay bounded.
+Twenty steps of capped tool output is about 20,000 tokens, which overflows
+a local model's 8K window around step 6. Gemini's window is large enough
+that it never notices, which is why this is developed against Ollama.
+
+When the history exceeds `AGENT_MAX_HISTORY_CHARS`, the oldest **tool
+results** are replaced with a one-line placeholder. Prose is never
+dropped — the task and the model's own reasoning are what tie the steps
+together — and the most recent result is always kept, since that is what
+the model is currently thinking about.
+
+### Reading part of a file
+
+Truncation protects the context but leaves the model blind to the rest of
+a file. Asked how many tests `test_llm.py` had, the local model counted
+8 out of 32, because it only saw 28% of it and guessed the remainder.
+
+`read_file` takes `start_line` and `end_line` for that reason:
+
+```
+read_file("agent/llm.py", 200, 260)   ->  [lines 200-260 of 512]
+```
+
+A range small enough to come back whole beats a whole file that gets cut.
 
 ## Rate limits
 
-The Gemini free tier allows only a handful of requests per minute, and each
-loop step costs at least one. The agent handles this itself rather than
-dying. Two kinds of failure are waited out:
+The Gemini free tier allows **20 requests per day** per model, and each
+loop step costs at least one, so a real agent loop exhausts it in a
+couple of minutes. The agent handles the failures itself rather than
+dying. Two kinds are waited out:
 
-- **429 rate limit** — the `retryDelay` the API returns is used verbatim,
-  because the server knows better than we do how long to wait
+- **429 per-minute rate limit** — the `retryDelay` the API returns is used
+  verbatim, because the server knows better than we do how long to wait
 - **5xx overloaded** — no hint is given, so the wait doubles each attempt,
   up to 30 seconds
 
-Everything else fails immediately. A bad request, a bad key, or an unknown
-model will fail the same way on attempt two, so retrying those would just
-make the user wait several minutes for the same error. Set
-`AGENT_MAX_RETRIES` to `0` to disable retrying entirely.
+Everything else fails immediately, with an explanation and a next step:
+
+- **429 daily quota** — reported identically to a per-minute one, including
+  a misleading `retryDelay`, but waiting cannot help. Recognised and
+  failed fast rather than retried for five minutes against a limit that
+  resets tomorrow.
+- **400 / 401 / 403 / 404** — fail the same way on attempt two, so retrying
+  just makes the user wait for the same error.
+
+Set `AGENT_MAX_RETRIES` to `0` to disable retrying entirely.
 
 A busy free tier also means a model can be listed and still be overloaded
 at the moment you use it. If a specific model keeps returning 503, try
-another: `--model gemini-3.5-flash-lite` or `gemini-3.1-flash-lite` have
-been reliable where `gemini-3.5-flash` was not.
+another: `gemini-3.5-flash-lite` and `gemini-3.1-flash-lite` have been
+reliable where `gemini-3.5-flash` was not.
 
 For unlimited testing, use the local provider instead.

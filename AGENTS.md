@@ -66,13 +66,21 @@ the agent's sandbox boundary is the project itself.
 ## Tools
 
 1. `list_files(path)` — list files, skipping `.git`, `.venv`, `node_modules`
-2. `read_file(path)` — return contents, truncating very large files
+2. `read_file(path, start_line, end_line)` — return contents, truncating
+   very large files. The line range exists because truncation hides the
+   rest of a file: a model asked how many tests a 448-line file had
+   counted 8 of 32. Ranges come back under the cap and therefore whole.
 3. `write_file(path, content)` — create or overwrite a file
 4. `edit_file(path, old, new)` — replace ONE exact match; error on zero or
    multiple matches
 5. `grep(pattern, path)` — search text in files
 6. `run_command(command)` — run a shell command with a timeout, return
    stdout / stderr / exit code
+
+Tools 3-6 are Phase 4. Do not add a tool that tells the model to use
+another tool that does not exist: that guidance has to be true, because
+the model acts on it and cannot tell the difference between a broken
+promise and a real failure.
 
 ## Safety rules
 
@@ -86,6 +94,11 @@ the agent's sandbox boundary is the project itself.
 - Tool output is truncated to `MAX_OUTPUT_CHARS` in `loop.py`, at the one
   point where results enter the conversation. Keep it there. A per-tool
   cap is only as good as the next tool added.
+- The whole conversation is re-sent every step, so `loop.py` compacts it
+  by dropping the oldest *tool results*. Never drop prose, and never drop
+  the most recent result: that is what the model is currently reasoning
+  about. Develop this against a local model. Gemini's 1M context hides
+  every overflow bug in the design.
 - `write_file`, `edit_file`, and `run_command` require an explicit y/n
   confirmation that shows exactly what will happen: a diff for edits, the
   full command for shell.

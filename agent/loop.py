@@ -1,13 +1,26 @@
 """The agent loop.
 
-Phase 2 stops after a single tool round trip. The full loop, where the
-model may keep asking for tools until it is done, arrives in Phase 3. The
-step counter and repeated-call structure below is deliberately laid out so
-Phase 3 is a matter of removing the early return, not rewriting anything.
+The loop is the whole point of this project, so it is written out longhand
+rather than handed to a framework. One step is:
+
+    send the conversation  ->  run whatever tools were asked for  ->  repeat
+
+It stops when the model replies with prose and no tool calls, when it
+repeats itself, or when it runs out of steps. Each of those is reported
+to the user rather than being swallowed, because "the agent gave up" and
+"the agent finished" look identical otherwise.
 """
 
-from . import safety, tools
+import json
+from dataclasses import replace
+
+from . import config, safety, tools
 from .llm import LLM, Message, ToolResult
+
+# Shown in place of a tool result that has been dropped to fit the context
+# window. It has to say something useful: the model may still want to know
+# a call happened even when it can no longer see what came back.
+DROPPED_RESULT = "[earlier result dropped to fit the context window]"
 
 
 def run_tool_call(name: str, args: dict) -> str:
@@ -45,59 +58,130 @@ def run_tool_call(name: str, args: dict) -> str:
         return f"{name} failed: {type(exc).__name__}: {exc}"
 
 
-def run_once(task: str, llm: LLM) -> str:
-    """Send a task, run any tool the model asks for, and reply once.
+def call_signature(name: str, args: dict) -> str:
+    """Return a stable key for a tool call, for spotting repeats.
 
-    This is one round trip: model -> tool -> model. If the model does not
-    ask for a tool, the reply is returned immediately.
+    Args are sorted so that `{"a": 1, "b": 2}` and `{"b": 2, "a": 1}` count
+    as the same call rather than evading the repeat check.
+    """
+    return f"{name}:{json.dumps(args, sort_keys=True, default=str)}"
+
+
+def _history_size(history: list[Message]) -> int:
+    """Return roughly how many characters the conversation will occupy."""
+    total = 0
+    for message in history:
+        total += len(message.text)
+        for call in message.tool_calls:
+            total += len(call.name) + len(json.dumps(call.args, default=str))
+        for result in message.results:
+            total += len(result.content)
+    return total
+
+
+def compact_history(
+    history: list[Message], budget: int | None = None
+) -> list[Message]:
+    """Shrink old tool results until the conversation fits `budget`.
+
+    The conversation is re-sent in full on every step, so it has to stay
+    bounded or a long run eventually asks the provider for more than it
+    can accept. Gemini's window is large enough to ignore this, which is
+    why a local model is the honest place to develop against.
+
+    Older results are dropped first, for two reasons. They are the bulk
+    of the conversation, and they are the ones the model has already read
+    and acted on. Prose is never dropped: the task and the model's own
+    reasoning are what tie the steps together.
+
+    The most recent tool result is always kept, even if that alone
+    exceeds the budget. Truncating the thing the model is currently
+    reasoning about would be worse than sending a long history.
+
+    Args:
+        history: The conversation so far, oldest first. Not modified.
+        budget: Character ceiling. Defaults to `config.MAX_HISTORY_CHARS`.
+
+    Returns:
+        A new list, or the original one if it already fits.
+    """
+    cap = config.MAX_HISTORY_CHARS if budget is None else budget
+    if _history_size(history) <= cap:
+        return history
+
+    compacted = list(history)
+    # Oldest first, but never the final tool turn.
+    for index, message in enumerate(compacted):
+        if message.role != "tool" or index == len(compacted) - 1:
+            continue
+        if _history_size(compacted) <= cap:
+            break
+        compacted[index] = replace(
+            message,
+            results=tuple(
+                replace(result, content=DROPPED_RESULT) for result in message.results
+            ),
+        )
+    return compacted
+
+
+def run(task: str, llm: LLM) -> str:
+    """Run the agent loop until the model is done asking for tools.
 
     Args:
         task: What the user asked for.
         llm: The model to use.
 
     Returns:
-        The model's final text for this step.
+        The model's final answer, or a plain statement of why the run
+        stopped early.
     """
     history: list[Message] = [Message(role="user", text=task)]
+    seen: dict[str, int] = {}
 
-    # Step 1: ask the model, giving it the tools it may call.
-    first = llm.send(history, tool_schemas=tools.TOOL_SCHEMAS)
-    if not first.tool_calls:
-        return first.text
+    for step in range(1, config.MAX_STEPS + 1):
+        response = llm.send(compact_history(history), tool_schemas=tools.TOOL_SCHEMAS)
 
-    for call in first.tool_calls:
-        print(f"  [tool] {call.name}({call.args})")
+        # Prose with no tool calls is the model saying it is finished.
+        if not response.tool_calls:
+            return response.text.strip() or "(the model returned nothing)"
 
-    history.append(
-        Message(
-            role="model",
-            text=first.text,
-            tool_calls=first.tool_calls,
-            raw=first.raw,
+        results: list[ToolResult] = []
+        for call in response.tool_calls:
+            signature = call_signature(call.name, call.args)
+            seen[signature] = seen.get(signature, 0) + 1
+
+            if seen[signature] > config.MAX_REPEATED_CALLS:
+                return (
+                    f"Stopped: the model asked for `{call.name}` with the same "
+                    f"arguments {seen[signature] - 1} times and stopped making "
+                    f"progress. Last request: {json.dumps(call.args)}. "
+                    f"Rephrasing the task, or adding a tool it is missing, "
+                    f"usually gets past this."
+                )
+
+            print(f"  [step {step}] {call.name}({json.dumps(call.args)})")
+            results.append(
+                ToolResult(
+                    call_id=call.id,
+                    name=call.name,
+                    content=run_tool_call(call.name, call.args),
+                )
+            )
+
+        history.append(
+            Message(
+                role="model",
+                text=response.text,
+                tool_calls=response.tool_calls,
+                raw=response.raw,
+            )
         )
+        history.append(Message(role="tool", results=tuple(results)))
+
+    return (
+        f"Stopped: reached the {config.MAX_STEPS}-step limit without a final "
+        f"answer. The last thing the model said was:\n\n"
+        f"{history[-2].text.strip() if history[-2].text else '(nothing)'}\n\n"
+        f"Raise AGENT_MAX_STEPS to continue, or narrow the task."
     )
-
-    # Step 2: run the requested tools and report the results back.
-    results = tuple(
-        ToolResult(
-            call_id=call.id,
-            name=call.name,
-            content=run_tool_call(call.name, call.args),
-        )
-        for call in first.tool_calls
-    )
-    history.append(Message(role="tool", results=results))
-
-    # Step 3: the model reads the results and gives its final answer.
-    final = llm.send(history, tool_schemas=tools.TOOL_SCHEMAS)
-
-    if final.tool_calls:
-        # The model wants to keep going. Looping is Phase 3, so say so
-        # rather than printing an empty reply.
-        wanted = ", ".join(sorted({c.name for c in final.tool_calls}))
-        return (
-            f"{final.text}\n\n"
-            f"[stopped after one round trip: the model asked for more "
-            f"tools ({wanted}). Looping arrives in Phase 3.]"
-        ).strip()
-    return final.text

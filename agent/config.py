@@ -75,6 +75,21 @@ MAX_OUTPUT_CHARS = int(os.environ.get("AGENT_MAX_OUTPUT_CHARS", "4000"))
 # because silently returning half a file can mislead the model.
 MAX_FILE_BYTES = int(os.environ.get("AGENT_MAX_FILE_BYTES", "512000"))
 
+# Ceiling on the whole conversation sent to the model, in characters.
+# Every step adds a tool result, so without this a 20-step run asks for
+# ~20000 tokens and overflows a local model's 8K window around step 6.
+# Gemini's context is large enough not to care, which is exactly why this
+# needs testing against the local provider and not just the cloud one.
+#
+# Roughly 4 characters per token, so 24000 leaves a 6K budget inside an
+# 8192 window once the tool schemas and the reply are accounted for.
+MAX_HISTORY_CHARS = int(os.environ.get("AGENT_MAX_HISTORY_CHARS", "24000"))
+
+# A model that asks for the same tool with the same arguments more than
+# this many times is not making progress, and on a CPU that is minutes
+# wasted per repetition. The run stops instead.
+MAX_REPEATED_CALLS = int(os.environ.get("AGENT_MAX_REPEATED_CALLS", "3"))
+
 # --- Sandbox -------------------------------------------------------------
 # The one directory the agent is allowed to read and write: the project
 # directory itself. Point the agent at some other repo with

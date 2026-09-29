@@ -405,3 +405,44 @@ def test_build_llm_follows_the_configured_provider(
 
     monkeypatch.setattr(config, "PROVIDER", "gemini")
     assert isinstance(llm.build_llm(), llm.GeminiLLM)
+
+
+# --- daily quota ----------------------------------------------------------
+# The free tier reports a daily limit as a 429 with a retryDelay, exactly
+# like a per-minute one. The delay is misleading, so retrying is waste.
+
+
+def test_daily_quota_is_not_retried() -> None:
+    error = Exception(
+        "429 RESOURCE_EXHAUSTED. quotaId: "
+        "'GenerateRequestsPerDayPerProjectPerModel-FreeTier' ... "
+        "retryDelay: '59s'"
+    )
+    assert llm.parse_retry_delay(error) is None
+
+
+def test_per_minute_quota_is_still_retried() -> None:
+    """The two must not be confused, or normal rate limiting stops working."""
+    error = Exception(
+        "429 RESOURCE_EXHAUSTED. quotaId: "
+        "'GenerateRequestsPerMinutePerProjectPerModel-FreeTier' ... "
+        "retryDelay: '20s'"
+    )
+    assert llm.parse_retry_delay(error) == pytest.approx(20.0)
+
+
+def test_daily_quota_fails_immediately_rather_than_waiting(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Five minutes of waiting cannot outlast a limit that resets tomorrow."""
+    monkeypatch.setattr(llm.time, "sleep", lambda _s: None)
+    monkeypatch.setattr(config, "MAX_RATE_LIMIT_RETRIES", 5)
+    calls = {"n": 0}
+
+    def daily_capped() -> None:
+        calls["n"] += 1
+        raise RuntimeError("429 quotaId: 'GenerateRequestsPerDayPerProject'")
+
+    with pytest.raises(RuntimeError):
+        llm.retry_on_rate_limit(daily_capped)
+    assert calls["n"] == 1

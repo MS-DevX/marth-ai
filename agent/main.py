@@ -8,7 +8,7 @@ import sys
 
 from dotenv import load_dotenv
 
-from . import config, loop
+from . import config, llm, loop
 from .llm import LLM, build_llm
 
 
@@ -43,6 +43,50 @@ def read_task(argument: str | None) -> str:
     return input("What should I do? ").strip()
 
 
+def explain_failure(exc: Exception) -> str:
+    """Turn a provider error into something the user can act on.
+
+    The raw SDK messages are long, name internal metrics, and bury the one
+    fact that matters. Each case below is a different mistake by the user
+    or a different limit being hit, so each gets its own next step.
+
+    Args:
+        exc: Whatever the provider raised.
+
+    Returns:
+        A short explanation. Falls back to the original text when the
+        cause is not one we recognise.
+    """
+    text = str(exc)
+    low = text.lower()
+
+    if any(marker in low for marker in llm.PERMANENT_QUOTA_MARKERS):
+        return (
+            "The free tier's daily quota for this model is used up. The API "
+            "reports it as a rate limit, but the limit resets tomorrow, so "
+            "retrying now will not help.\n\n"
+            "Use the local model instead, which has no quota:\n"
+            "  AGENT_PROVIDER=openai python -m agent.main \"your task\"\n"
+            "or try a different model with --model."
+        )
+    if "401" in low or "invalid" in low and "api key" in low:
+        return (
+            "The API key was rejected. Check that GEMINI_API_KEY is set in "
+            "the project's .env file."
+        )
+    if "404" in low or "not found" in low and "model" in low:
+        return (
+            "That model is not available to this key. Run "
+            "`python -m agent.main --list-models` to see what is."
+        )
+    if "could not reach" in low:
+        return text
+    if len(text) > 400:
+        # Long provider errors are mostly quota links and metric names.
+        return f"{text[:400]}\n\n(run with --list-models to check the model name)"
+    return f"Error talking to the model: {type(exc).__name__}: {text}"
+
+
 def ask_model(llm: LLM, task: str) -> str:
     """Run the agent on a task and return its reply.
 
@@ -50,12 +94,12 @@ def ask_model(llm: LLM, task: str) -> str:
     instead of a stack trace. The API key is never part of what we print.
     """
     try:
-        return loop.run_once(task, llm)
+        return loop.run(task, llm)
     except RuntimeError as exc:
         # Our own config errors (e.g. missing API key) already read well.
         return f"Configuration error: {exc}"
     except Exception as exc:  # noqa: BLE001 - CLI boundary, report and stop.
-        return f"Error talking to the model: {type(exc).__name__}: {exc}"
+        return explain_failure(exc)
 
 
 def list_models(llm: LLM) -> list[str]:
@@ -94,7 +138,7 @@ def main(argv: list[str] | None = None) -> int:
     print(f"Model:     {args.model or config.MODEL_NAME}\n")
 
     llm = build_llm(args.model)
-    print(ask_model(llm, task))
+    print(loop.run(task, llm))
     return 0
 
 

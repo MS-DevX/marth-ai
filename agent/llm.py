@@ -303,6 +303,12 @@ TRANSIENT_MARKERS = (
     "internal",
 )
 
+# A daily quota is reported with the same 429 and the same `retryDelay` as a
+# per-minute one, and the delay is misleading: it names when the *minute*
+# resets, not the day. Retrying for five minutes against a limit that resets
+# tomorrow cannot succeed, so it is treated as permanent.
+PERMANENT_QUOTA_MARKERS = ("perday", "per_day", "per-day", "daily quota")
+
 # Word-boundary match on the status code. A plain `"503" in body` would also
 # fire on a model name or a retryDelay value, and `" 503 " in body` misses
 # the common case of the code ending the message.
@@ -327,6 +333,8 @@ def parse_retry_delay(error: Exception, attempt: int = 0) -> float | None:
         Seconds to wait, or None if the error is not transient.
     """
     body = str(error).lower()
+    if any(marker in body for marker in PERMANENT_QUOTA_MARKERS):
+        return None
     if not TRANSIENT_PATTERN.search(body) and not any(
         marker in body for marker in TRANSIENT_MARKERS
     ):

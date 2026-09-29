@@ -131,8 +131,10 @@ def truncate(text: str, limit: int | None = None) -> str:
     return (
         f"{text[:cap]}\n\n"
         f"[truncated: {dropped} more characters not shown, out of {len(text)} "
-        f"total. Use grep to search the file, or read a specific line "
-        f"range, rather than asking for the whole thing again.]"
+        f"total. This file is longer than the context allows in one piece, "
+        f"so counts and totals derived from it are unreliable. Call "
+        f"read_file again with start_line and end_line to read the rest in "
+        f"sections rather than repeating this same request.]"
     )
 
 

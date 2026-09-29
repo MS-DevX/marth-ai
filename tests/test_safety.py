@@ -179,4 +179,4 @@ def test_truncation_defaults_to_the_configured_limit(
 def test_truncation_suggests_a_way_forward() -> None:
     """Telling the model how to get less is what stops it retrying the same
     oversized read for another twenty steps."""
-    assert "grep" in safety.truncate("z" * 5000, limit=100)
+    assert "read_file" in safety.truncate("z" * 5000, limit=100)

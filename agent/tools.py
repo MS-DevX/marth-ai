@@ -61,14 +61,22 @@ def list_files(path: str = ".") -> str:
     return "\n".join(entries)
 
 
-def read_file(path: str) -> str:
-    """Read a text file.
+def read_file(path: str, start_line: int = 0, end_line: int = 0) -> str:
+    """Read a text file, or a numbered range of its lines.
+
+    Large results are truncated before reaching the model, so a long file
+    arrives incomplete and the model cannot count lines, grep it, or see
+    what was cut. Reading a range is the way back: it asks for less than
+    the cap, so the answer arrives whole.
 
     Args:
         path: File to read, relative to the workspace root.
+        start_line: First line to return, 1-based and inclusive. 0 means
+            from the beginning.
+        end_line: Last line to return, inclusive. 0 means to the end.
 
     Returns:
-        The file's contents, or a short message explaining the problem.
+        The requested lines, or a short message explaining the problem.
     """
     target = safety.resolve_path(path)
     if not target.is_file():
@@ -80,9 +88,31 @@ def read_file(path: str) -> str:
         )
 
     try:
-        return target.read_text(encoding="utf-8")
+        text = target.read_text(encoding="utf-8")
     except UnicodeDecodeError:
         return f"Not a text file (binary content): {path}"
+
+    # A whole-file read is the common case and needs no line handling.
+    if not start_line and not end_line:
+        return text
+
+    lines = text.splitlines()
+    # Checked before the bounds below, because a reversed range also sits
+    # past the end of the file and would otherwise be reported as that.
+    if end_line and end_line < start_line:
+        return f"end_line ({end_line}) is before start_line ({start_line})."
+
+    first = max(1, start_line) - 1
+    last = end_line if end_line else len(lines)
+    if first >= len(lines):
+        return (
+            f"{path} has {len(lines)} lines, so there is nothing at line "
+            f"{start_line}. Ask for a range within 1-{len(lines)}."
+        )
+
+    chosen = lines[first:last]
+    shown = f"{first + 1}-{first + len(chosen)} of {len(lines)}"
+    return f"[lines {shown}]\n" + "\n".join(chosen)
 
 
 TOOL_REGISTRY = {
@@ -116,8 +146,10 @@ TOOL_SCHEMAS: list[dict] = [
     {
         "name": "read_file",
         "description": (
-            "Read the full contents of a text file. Returns an error "
-            "message if the path is missing, a directory, or too large."
+            "Read a text file. Long results are cut short, so for a large "
+            "file ask for a line range instead to make sure you see all of "
+            "the part you care about. Returns an error message if the path "
+            "is missing, a directory, too large, or a secret file."
         ),
         "parameters": {
             "type": "object",
@@ -125,6 +157,20 @@ TOOL_SCHEMAS: list[dict] = [
                 "path": {
                     "type": "string",
                     "description": "File to read, relative to the workspace root.",
+                },
+                "start_line": {
+                    "type": "integer",
+                    "description": (
+                        "First line to return, 1-based and inclusive. "
+                        "Omit to start at the beginning."
+                    ),
+                },
+                "end_line": {
+                    "type": "integer",
+                    "description": (
+                        "Last line to return, inclusive. Omit to read to "
+                        "the end of the file."
+                    ),
                 },
             },
             "required": ["path"],
