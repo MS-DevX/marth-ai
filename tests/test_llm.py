@@ -9,7 +9,6 @@ import pytest
 
 from agent import config, llm
 
-
 def make_client(**kwargs) -> llm.OpenAICompatLLM:
     """Return an OpenAI-compatible client with test-friendly settings."""
     kwargs.setdefault("model", "test-model")
@@ -267,8 +266,84 @@ def test_retry_delay_is_parsed_from_an_openai_error() -> None:
     assert llm.parse_retry_delay(error) == pytest.approx(2.0)
 
 
-def test_non_rate_limit_errors_are_not_retried() -> None:
-    assert llm.parse_retry_delay(Exception("HTTP 404 model not found")) is None
+@pytest.mark.parametrize(
+    "message",
+    [
+        "HTTP 400 malformed request",
+        "HTTP 401 invalid api key",
+        "HTTP 403 permission denied",
+        "HTTP 404 model not found",
+    ],
+)
+def test_permanent_errors_are_not_retried(message: str) -> None:
+    """These fail the same way on attempt two, so retrying just wastes time."""
+    assert llm.parse_retry_delay(Exception(message)) is None
+
+
+def test_server_overload_is_retried() -> None:
+    """Google calls a 503 'usually temporary'; the run should survive it."""
+    delay = llm.parse_retry_delay(
+        Exception("ServerError: 503 UNAVAILABLE. Spikes in demand are temporary.")
+    )
+    assert delay is not None
+
+
+def test_bad_gateway_and_gateway_timeout_are_retried() -> None:
+    assert llm.parse_retry_delay(Exception("HTTP 502 Bad Gateway")) is not None
+    assert llm.parse_retry_delay(Exception("HTTP 504 Gateway Timeout")) is not None
+
+
+def test_backoff_grows_with_each_attempt() -> None:
+    """An unnamed 5xx gives no hint, so the wait has to widen itself."""
+    error = Exception("HTTP 503 UNAVAILABLE")
+    assert llm.parse_retry_delay(error, 0) < llm.parse_retry_delay(error, 1)
+    assert llm.parse_retry_delay(error, 1) < llm.parse_retry_delay(error, 2)
+
+
+def test_backoff_is_capped() -> None:
+    """An unbounded backoff would stall a run indefinitely."""
+    assert llm.parse_retry_delay(Exception("HTTP 503"), 50) == 30.0
+
+
+def test_server_hint_beats_our_backoff() -> None:
+    """When the API says how long to wait, that wins."""
+    error = Exception("503 UNAVAILABLE retryDelay: 3s")
+    assert llm.parse_retry_delay(error, 5) == pytest.approx(3.0)
+
+
+def test_transient_error_eventually_recovers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The 503 case end to end: fail twice, succeed on the third try."""
+    monkeypatch.setattr(llm.time, "sleep", lambda _s: None)
+    monkeypatch.setattr(config, "MAX_RATE_LIMIT_RETRIES", 4)
+    calls = {"n": 0}
+
+    def overloaded() -> str:
+        calls["n"] += 1
+        if calls["n"] < 3:
+            raise RuntimeError("ServerError: 503 UNAVAILABLE")
+        return "ok"
+
+    assert llm.retry_on_rate_limit(overloaded) == "ok"
+    assert calls["n"] == 3
+
+
+def test_permanent_error_fails_immediately(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A bad key must not cost the user five minutes of waiting."""
+    monkeypatch.setattr(llm.time, "sleep", lambda _s: None)
+    monkeypatch.setattr(config, "MAX_RATE_LIMIT_RETRIES", 5)
+    calls = {"n": 0}
+
+    def bad_key() -> None:
+        calls["n"] += 1
+        raise RuntimeError("HTTP 400 INVALID_ARGUMENT: malformed request")
+
+    with pytest.raises(RuntimeError):
+        llm.retry_on_rate_limit(bad_key)
+    assert calls["n"] == 1
 
 
 def test_retry_on_rate_limit_returns_the_result(monkeypatch: pytest.MonkeyPatch) -> None:

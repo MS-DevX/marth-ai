@@ -120,12 +120,38 @@ environment variables (see `.env.example`):
 | `AGENT_CONTEXT_TOKENS` | `8192` | Context window requested |
 | `AGENT_THINKING` | `0` | Set to `1` to see hybrid-model reasoning traces |
 | `AGENT_TIMEOUT` | `300` | Per-request timeout; local models are slow |
-| `AGENT_MAX_RETRIES` | `5` | Rate-limit retries before giving up |
-| `AGENT_MAX_RETRY_WAIT` | `60` | Longest single rate-limit wait |
+| `AGENT_MAX_RETRIES` | `5` | Retries for a busy or overloaded provider |
+| `AGENT_MAX_RETRY_WAIT` | `60` | Longest single retry wait |
 
 The workspace root is the sandbox boundary. The agent may only read and
 write files that resolve inside it. By default that is the `marth-ai/`
 project directory, so the agent cannot wander into your home directory.
+
+Being inside the workspace is not enough on its own. Secret files live in
+there too, and the agent has no reason to see any of them:
+
+| Blocked | Allowed |
+| --- | --- |
+| `.env`, `.ENV`, `credentials`, `secrets` | `.env.example`, `.env.sample` |
+| `id_rsa`, `id_ed25519`, `.netrc`, `.npmrc` | any ordinary source file |
+| `*.key`, `*.pem`, `*.p12`, `*.pfx`, `*.keystore` | |
+
+The check runs on the resolved name, so `agent/../.env` is refused the
+same as `.env`, and the committed templates stay readable because they
+document the variables without holding any values.
+
+This matters more than it looks. A file the agent reads can contain
+instructions aimed at the model, and `.env` is the one file worth
+stealing. Blocking on the filename means the answer does not depend on
+the model choosing to refuse.
+
+### Output limits
+
+Every tool result is truncated to `AGENT_MAX_OUTPUT_CHARS` (4000) before it
+reaches the model, at a single choke point in the loop so no tool can skip
+it. Without this, reading one 20 KB source file fills most of an 8K context
+window and the next turn has nowhere to go. Truncated results say how much
+was dropped and suggest `grep` instead of re-reading.
 
 ## Layout
 
@@ -137,14 +163,15 @@ marth-ai/
   .env.example
   agent/
     main.py          CLI entry: read task, run loop
-    loop.py          the agent loop
-    llm.py           Gemini wrapper behind a swappable interface
+    loop.py          the agent loop + the tool-output truncation choke point
+    llm.py           provider boundary: Gemini + OpenAI-compatible
     tools.py         tool functions + tool schemas
-    safety.py        path sandbox + confirmation prompts
+    safety.py        path sandbox, secret blocking, truncation, confirmations
     config.py        model name, max steps, workspace root
   tests/
     test_tools.py
     test_safety.py
+    test_llm.py
 ```
 
 ## Roadmap
@@ -158,8 +185,22 @@ marth-ai/
 ## Rate limits
 
 The Gemini free tier allows only a handful of requests per minute, and each
-loop step costs at least one. The agent now handles this itself: on a
-`429` it reads the `retryDelay` the API returns, waits exactly that long,
-and retries. Set `AGENT_MAX_RETRIES` to `0` to disable.
+loop step costs at least one. The agent handles this itself rather than
+dying. Two kinds of failure are waited out:
+
+- **429 rate limit** — the `retryDelay` the API returns is used verbatim,
+  because the server knows better than we do how long to wait
+- **5xx overloaded** — no hint is given, so the wait doubles each attempt,
+  up to 30 seconds
+
+Everything else fails immediately. A bad request, a bad key, or an unknown
+model will fail the same way on attempt two, so retrying those would just
+make the user wait several minutes for the same error. Set
+`AGENT_MAX_RETRIES` to `0` to disable retrying entirely.
+
+A busy free tier also means a model can be listed and still be overloaded
+at the moment you use it. If a specific model keeps returning 503, try
+another: `--model gemini-3.5-flash-lite` or `gemini-3.1-flash-lite` have
+been reliable where `gemini-3.5-flash` was not.
 
 For unlimited testing, use the local provider instead.

@@ -283,28 +283,64 @@ class GeminiLLM:
         return sorted(m.name.split("/")[-1] for m in models)
 
 
-# --- Rate limiting --------------------------------------------------------
+# --- Transient failures ---------------------------------------------------
+
+# Failures worth waiting out. A 429 means we are going too fast, and a 5xx
+# means the far end is briefly overloaded or restarting. Both usually clear
+# on their own, so retrying turns a dead run into a slow one.
+#
+# Everything else is left out on purpose. A 400 bad request, a 401 bad key
+# and a 404 unknown model fail identically on the second attempt, so
+# retrying them just burns minutes before the same error appears.
+TRANSIENT_STATUSES = {429, 500, 502, 503, 504}
+
+# gRPC-style names the SDK surfaces for the same conditions.
+TRANSIENT_MARKERS = (
+    "resource_exhausted",
+    "unavailable",
+    "overloaded",
+    "deadline_exceeded",
+    "internal",
+)
+
+# Word-boundary match on the status code. A plain `"503" in body` would also
+# fire on a model name or a retryDelay value, and `" 503 " in body` misses
+# the common case of the code ending the message.
+TRANSIENT_PATTERN = re.compile(
+    r"\b(" + "|".join(str(code) for code in sorted(TRANSIENT_STATUSES)) + r")\b"
+)
 
 
-def parse_retry_delay(error: Exception) -> float | None:
-    """Return the seconds an API asked us to wait, if it said.
+def parse_retry_delay(error: Exception, attempt: int = 0) -> float | None:
+    """Return how long to wait before retrying, or None if we should not.
 
-    Both providers report rate limits as HTTP 429 and include a
-    `retryDelay` such as `"19s"` or `"1.5s"` somewhere in the body.
-    Returns None when the error is not a rate limit.
+    Both providers report a rate limit as HTTP 429 and include a
+    `retryDelay` such as `"19s"` somewhere in the body; when one is
+    present it is used verbatim, because the server knows better than we
+    do. A 5xx carries no such hint, so the wait doubles per attempt.
+
+    Args:
+        error: The exception raised by the provider.
+        attempt: Zero-based retry count, used to size the backoff.
+
+    Returns:
+        Seconds to wait, or None if the error is not transient.
     """
     body = str(error).lower()
-    if "429" not in body and "resource_exhausted" not in body:
+    if not TRANSIENT_PATTERN.search(body) and not any(
+        marker in body for marker in TRANSIENT_MARKERS
+    ):
         return None
+
     match = re.search(r"retrydelay[\"'\s:]+([0-9.]+)\s*s", body)
     if match:
         return float(match.group(1))
-    # Fall back to something sane if the wording is unfamiliar.
-    return 5.0
+    # No hint given: back off gently rather than hammering immediately.
+    return float(min(2**attempt * 2, 30))
 
 
 def retry_on_rate_limit(send: Callable[[], Any]) -> Any:
-    """Call `send`, waiting and retrying if the API reports a rate limit.
+    """Call `send`, waiting and retrying if the API is temporarily busy.
 
     Args:
         send: A zero-argument callable that performs one request.
@@ -313,17 +349,17 @@ def retry_on_rate_limit(send: Callable[[], Any]) -> Any:
         Whatever `send` returned.
 
     Raises:
-        The last error, if we run out of retries.
+        The last error, if it is permanent or we run out of retries.
     """
     for attempt in range(config.MAX_RATE_LIMIT_RETRIES + 1):
         try:
             return send()
         except Exception as exc:  # noqa: BLE001 - inspected, then re-raised.
-            delay = parse_retry_delay(exc)
+            delay = parse_retry_delay(exc, attempt)
             if delay is None or attempt == config.MAX_RATE_LIMIT_RETRIES:
                 raise
             wait = min(delay, config.MAX_RETRY_WAIT_SECONDS)
-            print(f"  [rate limited] waiting {wait:.0f}s, then retrying...")
+            print(f"  [provider busy] waiting {wait:.0f}s, then retrying...")
             time.sleep(wait)
     raise RuntimeError("unreachable")  # pragma: no cover
 

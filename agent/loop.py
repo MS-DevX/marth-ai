@@ -6,7 +6,7 @@ step counter and repeated-call structure below is deliberately laid out so
 Phase 3 is a matter of removing the early return, not rewriting anything.
 """
 
-from . import tools
+from . import safety, tools
 from .llm import LLM, Message, ToolResult
 
 
@@ -16,12 +16,18 @@ def run_tool_call(name: str, args: dict) -> str:
     A tool that fails returns an error string rather than raising, so the
     model gets to read what went wrong and try something else.
 
+    The result is truncated here, at the single point where tool output
+    enters the conversation, rather than inside each tool. That way the
+    context window cannot be blown by a large file no matter which tool
+    produced it, including tools added later.
+
     Args:
         name: The tool name the model used.
         args: The arguments the model supplied.
 
     Returns:
-        The tool's output, or a message describing why it could not run.
+        The tool's output, capped in length, or a message describing why
+        it could not run.
     """
     tool = tools.TOOL_REGISTRY.get(name)
     if tool is None:
@@ -30,9 +36,11 @@ def run_tool_call(name: str, args: dict) -> str:
 
     # Guard against a tool that does not take the arguments the model sent.
     try:
-        return str(tool(**args))
+        return safety.truncate(str(tool(**args)))
     except TypeError as exc:
         return f"Bad arguments for {name}: {exc}"
+    except safety.SecretFileError as exc:
+        return str(exc)
     except Exception as exc:  # noqa: BLE001 - report to the model, keep going.
         return f"{name} failed: {type(exc).__name__}: {exc}"
 

@@ -1,9 +1,12 @@
-"""Path sandbox and confirmation prompts.
+"""Path sandbox, secret-file blocking, output truncation, confirmations.
 
 The rule this module enforces: the agent may only touch files that resolve
 to a path INSIDE the workspace root. "Resolve" means after following `..`,
 symlinks, and anything else the filesystem does, so a symlink pointing at
 `/etc` is rejected just like a literal `../../etc` would be.
+
+Being inside the workspace is necessary but not sufficient. Secret files
+live in the workspace too, and the agent has no business reading them.
 """
 
 from pathlib import Path
@@ -15,8 +18,56 @@ class SandboxError(Exception):
     """Raised when a requested path falls outside the workspace root."""
 
 
+class SecretFileError(Exception):
+    """Raised when the agent tries to read or write a secret file."""
+
+
+# Files the agent must never touch, even though they sit inside the
+# workspace. `.env` holds the API key: the model has no reason to see it,
+# and a prompt injection hidden in any file it *does* read could ask for
+# it. Blocking on the filename is a blunt instrument, but it is the
+# difference between "the model was asked not to" and "the model cannot".
+#
+# Checked against the filename only, case-insensitively, because a model
+# that wants `../` also wants `.ENV`.
+SECRET_NAMES = {
+    ".env",
+    "credentials",
+    "secrets",
+    "id_rsa",
+    "id_ed25519",
+    ".netrc",
+    ".npmrc",
+    ".pypirc",
+}
+SECRET_SUFFIXES = (".key", ".pem", ".p12", ".pfx", ".keystore")
+
+# Committed templates of a secret file, which contain no secrets and are
+# worth reading: they document which variables the project expects.
+SECRET_EXEMPT_SUFFIXES = (".example", ".sample", ".template", ".dist")
+
+
+def is_secret_file(path: Path) -> bool:
+    """Return True if `path` looks like a file holding credentials.
+
+    Args:
+        path: Resolved path, or any path with a name to inspect.
+
+    Returns:
+        True when the name matches a known secret file, key or password
+        file. Templates such as `.env.example` are not secret and return
+        False.
+    """
+    name = path.name.lower()
+    if name.endswith(SECRET_EXEMPT_SUFFIXES):
+        return False
+    if name in SECRET_NAMES:
+        return True
+    return name.endswith(SECRET_SUFFIXES)
+
+
 def resolve_path(path: str | Path, root: Path | None = None) -> Path:
-    """Resolve `path` and confirm it stays inside the workspace.
+    """Resolve `path` and confirm it is safe for the agent to touch.
 
     Args:
         path: The path the model asked for. May be relative to the root.
@@ -24,11 +75,13 @@ def resolve_path(path: str | Path, root: Path | None = None) -> Path:
             `config.WORKSPACE_ROOT`. Tests pass an explicit root.
 
     Returns:
-        The fully resolved absolute `Path`, guaranteed to be inside `root`.
+        The fully resolved absolute `Path`, guaranteed to be inside `root`
+        and not a secret file.
 
     Raises:
         SandboxError: if the path escapes the root, including via `..`,
             an absolute path, or a symlink.
+        SecretFileError: if the path names a file holding credentials.
     """
     base = (root or config.WORKSPACE_ROOT).expanduser().resolve()
     candidate = Path(path).expanduser()
@@ -43,7 +96,44 @@ def resolve_path(path: str | Path, root: Path | None = None) -> Path:
         raise SandboxError(
             f"Path is outside the workspace ({base}): {path}"
         )
+
+    # Checked after the boundary, so the check is on the real name on disk
+    # and cannot be bypassed by reaching the file from another directory.
+    if is_secret_file(resolved):
+        raise SecretFileError(
+            f"Refusing to touch a secret file: {resolved.name}. The agent "
+            f"does not need credentials to read code, and a file it has "
+            f"read could contain instructions asking it to fetch them."
+        )
     return resolved
+
+
+def truncate(text: str, limit: int | None = None) -> str:
+    """Cut `text` to `limit` characters and say what was dropped.
+
+    Every byte a tool returns goes into the model's context window, and
+    that window is finite. A single large file can fill it, which starves
+    the next turn. This is applied to tool output as a whole rather than
+    inside each tool, so a future tool cannot forget to do it.
+
+    Args:
+        text: The text to shorten.
+        limit: Maximum characters. Defaults to `config.MAX_OUTPUT_CHARS`.
+
+    Returns:
+        The text unchanged if it fits, otherwise the first `limit`
+        characters plus a note describing how to get the rest.
+    """
+    cap = config.MAX_OUTPUT_CHARS if limit is None else limit
+    if len(text) <= cap:
+        return text
+    dropped = len(text) - cap
+    return (
+        f"{text[:cap]}\n\n"
+        f"[truncated: {dropped} more characters not shown, out of {len(text)} "
+        f"total. Use grep to search the file, or read a specific line "
+        f"range, rather than asking for the whole thing again.]"
+    )
 
 
 # --- Phase 4 -------------------------------------------------------------
