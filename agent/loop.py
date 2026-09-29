@@ -52,7 +52,11 @@ def run_tool_call(name: str, args: dict) -> str:
         return safety.truncate(str(tool(**args)))
     except TypeError as exc:
         return f"Bad arguments for {name}: {exc}"
-    except safety.SecretFileError as exc:
+    except (safety.SandboxError, safety.SecretFileError) as exc:
+        # These two carry messages written for the model, so they are
+        # passed through. The generic handler below would prefix them
+        # with a Python exception name, which tells the model nothing
+        # it can act on.
         return str(exc)
     except Exception as exc:  # noqa: BLE001 - report to the model, keep going.
         return f"{name} failed: {type(exc).__name__}: {exc}"

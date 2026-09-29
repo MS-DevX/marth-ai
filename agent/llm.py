@@ -176,6 +176,12 @@ class GeminiLLM:
                     )
                 )
             elif message.role == "tool":
+                # Function results go back under role "user", not "tool".
+                # The API used to accept a "tool" role and no longer
+                # does: it answers `Role 'tool' is not supported`, with
+                # no hint that "user" is what it wants instead. Verified
+                # against the live endpoint, since the docs lead with the
+                # newer Interactions API and no longer show this shape.
                 parts = [
                     types.Part.from_function_response(
                         name=result.name,
@@ -183,7 +189,7 @@ class GeminiLLM:
                     )
                     for result in message.results
                 ]
-                contents.append(types.Content(role="tool", parts=parts))
+                contents.append(types.Content(role="user", parts=parts))
         return contents
 
     def _build_tools(self, tool_schemas: list[dict] | None) -> list:

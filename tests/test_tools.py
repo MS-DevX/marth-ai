@@ -12,26 +12,6 @@ import pytest
 from agent import config, safety, tools
 
 
-@pytest.fixture
-def project(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    """Return a temp directory that looks like a small project.
-
-    The sandbox root is redirected to it so the tools operate on this
-    fixture instead of the real workspace. Tools deliberately take only a
-    `path` argument (the model supplies it), so the root has to come from
-    config rather than from a parameter.
-    """
-    (tmp_path / "agent").mkdir()
-    (tmp_path / "agent" / "main.py").write_text("print('hi')\n")
-    (tmp_path / "README.md").write_text("# Title\n")
-    (tmp_path / ".git").mkdir()
-    (tmp_path / ".git" / "config").write_text("secret=1\n")
-    (tmp_path / "node_modules").mkdir()
-    (tmp_path / "node_modules" / "left-pad.js").write_text("//\n")
-    monkeypatch.setattr(config, "WORKSPACE_ROOT", tmp_path)
-    return tmp_path
-
-
 # --- list_files ----------------------------------------------------------
 
 

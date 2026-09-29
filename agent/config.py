@@ -55,6 +55,13 @@ REQUEST_TIMEOUT_SECONDS = float(os.environ.get("AGENT_TIMEOUT", "300"))
 MAX_RATE_LIMIT_RETRIES = int(os.environ.get("AGENT_MAX_RETRIES", "5"))
 MAX_RETRY_WAIT_SECONDS = float(os.environ.get("AGENT_MAX_RETRY_WAIT", "60"))
 
+# --- Confirmations --------------------------------------------------------
+# Off by default. When on, write_file, edit_file and run_command run
+# without asking. The destructive-command blocklist still applies, because
+# that is a refusal rather than a confirmation, but everything else is
+# trusted. Only sensible in a throwaway checkout or a container.
+AUTO_APPROVE = os.environ.get("AGENT_YES", "0") == "1"
+
 # The project directory, used to find .env reliably no matter where the
 # agent is launched from.
 PROJECT_ROOT = Path(__file__).resolve().parent.parent

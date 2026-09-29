@@ -1,4 +1,4 @@
-"""Path sandbox, secret-file blocking, output truncation, confirmations.
+"""Path sandbox, secret blocking, output truncation, confirmations.
 
 The rule this module enforces: the agent may only touch files that resolve
 to a path INSIDE the workspace root. "Resolve" means after following `..`,
@@ -7,8 +7,14 @@ symlinks, and anything else the filesystem does, so a symlink pointing at
 
 Being inside the workspace is necessary but not sufficient. Secret files
 live in the workspace too, and the agent has no business reading them.
+
+Everything here is read-only or a prompt. Nothing in this module performs
+the action the user is being asked about, so a bug in here can only ever
+fail to ask, never to act.
 """
 
+import difflib
+import sys
 from pathlib import Path
 
 from . import config
@@ -138,13 +144,214 @@ def truncate(text: str, limit: int | None = None) -> str:
     )
 
 
-# --- Phase 4 -------------------------------------------------------------
-# The following will live here once write_file / edit_file / run_command
-# are implemented. They are declared now so the shape of the module is
-# visible in advance:
+# --- Command blocklist ----------------------------------------------------
 #
-#   confirm_write(resolved_path, content) -> bool
-#   confirm_edit(resolved_path, old, new) -> bool   # shows a diff
-#   confirm_command(command) -> bool                 # shows the full command
-#   is_command_blocked(command) -> bool               # rm -rf /, format, ...
-#   truncate(text, limit) -> str
+# These are refused outright. A confirmation prompt exists so the user can
+# make a judgement about a command they can see; it is not a defence
+# against a command that was never meant to be run, and a model that is
+# looping or confused will happily ask for something catastrophic.
+#
+# Matched against the command with whitespace collapsed and LOWERCASED, so
+# every pattern below must be lowercase too. Writing `-R` or `$HOME` in a
+# pattern here is a silent hole: the input can never contain an uppercase
+# letter, so the rule quietly stops matching.
+#
+# The patterns are deliberately blunt. A false positive costs one refused
+# command the user can rewrite; a false negative can cost the disk.
+#
+# `rm` in any flag form, short or long, followed by a root-level target.
+_RM = r"\brm\b(?:\s+-{1,2}[a-z-]+)*\s+"
+
+# Top-level directories whose removal breaks the machine.
+_SYSTEM_DIRS = r"/?(?:bin|boot|dev|etc|home|lib|opt|proc|root|sbin|srv|sys|usr|var)"
+
+DESTRUCTIVE_PATTERNS = (
+    # Whole-disk and recursive deletes. The trailing `[/*]*` is
+    # what catches `/`, `/*`, `~/`, `../` and `$HOME/`, not just
+    # the bare form.
+    _RM + r"(?:/|~|\$home|\*|\.\.?)[/*]*(?:\s|$)",
+    _RM + _SYSTEM_DIRS + r"(?:/|\s|$)",
+    # Disk and filesystem tools.
+    r"\bmkfs(?:\.|\s)",
+    r"\bdd\b[^|]*\bof=/dev/",
+    r">\s*/dev/[sh]d[a-z]\b",
+    r"\bfdisk\b",
+    r"\bformat\s+[a-z]:",
+    r"\bshred\b",
+    # Privilege and ownership. Flags are lowercase because the input is.
+    r"\bchmod\b(?:\s+-[a-z]+)*\s+(?:777|666)\s+/(?:\s|$)",
+    r"\bchmod\b\s+-r\s+777\s+/(?:\s|$)",
+    r"\bchown\b\s+-[a-z]*r[a-z]*\s+[^ ]+\s+/(?:\s|$)",
+    r"\bpasswd\b",
+    r"\bsudo\b",
+    # Machine state.
+    r"\bshutdown\b",
+    r"\breboot\b",
+    r"\bhalt\b",
+    r"\binit\s+0\b",
+    # Process and history destruction.
+    r"\bkill(?:all)?\s+-9\s+1\b",
+    r"\bhistory\s+-c\b",
+    # A force push that cannot be recovered from. `--force-with-lease` is
+    # the careful version and stays allowed.
+    r"\bgit\s+push\b[^;|&]*--force(?!-with-lease)",
+    # Fork bomb.
+    r":\s*\(\s*\)\s*\{.*\|.*&.*\}\s*;?\s*:",
+    # Redirecting over a shell profile, which makes the damage persist.
+    r">\s*(?:~|\$home)?/?\.(?:bashrc|zshrc|profile|bash_profile)",
+    # Piping a download straight into a shell.
+    r"\b(?:curl|wget)\b[^|]*\|\s*(?:sudo\s+)?(?:ba|z|k|)?sh\b",
+)
+
+
+def is_command_blocked(command: str) -> tuple[bool, str]:
+    """Check a command against the destructive blocklist.
+
+    Args:
+        command: The full command the model wants to run.
+
+    Returns:
+        `(blocked, reason)`. `reason` explains what tripped, so the model
+        can report something useful instead of just "refused".
+    """
+    import re
+
+    normalised = " ".join(command.split()).lower()
+    for pattern in DESTRUCTIVE_PATTERNS:
+        if re.search(pattern, normalised):
+            return True, f"it matches a destructive-command rule: /{pattern}/"
+    return False, ""
+
+
+# --- Confirmations --------------------------------------------------------
+
+
+def _ask(prompt: str) -> bool:
+    """Ask a yes/no question on the terminal.
+
+    Args:
+        prompt: The question to put to the user.
+
+    Returns:
+        True for y/yes, False for anything else.
+
+    If there is no terminal to ask on, the answer is no. Defaulting to
+    "yes" here would mean an unattended run silently did whatever the
+    model asked, which is the opposite of what a confirmation is for.
+    """
+    if config.AUTO_APPROVE:
+        _warn_auto_approve()
+        return True
+    if not sys.stdin.isatty():
+        print(f"\n{prompt}\n[no terminal available - refusing]", file=sys.stderr)
+        return False
+    try:
+        answer = input(f"\n{prompt}\n> ").strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        print("", file=sys.stderr)
+        return False
+    return answer in {"y", "yes"}
+
+
+_AUTO_APPROVE_WARNED = False
+
+
+def _warn_auto_approve() -> None:
+    """Say once, loudly, that nothing is being confirmed."""
+    global _AUTO_APPROVE_WARNED
+    if _AUTO_APPROVE_WARNED:
+        return
+    _AUTO_APPROVE_WARNED = True
+    print(
+        "\n" + "!" * 60 + "\n"
+        "AUTO-APPROVAL IS ON (--yes). Every write, edit and command the\n"
+        "model asks for runs without asking you. Blocked commands are\n"
+        "still refused, but nothing else is. Use this only in a throwaway\n"
+        "checkout or a container.\n" + "!" * 60,
+        file=sys.stderr,
+    )
+
+
+def confirm_write(path: Path, content: str) -> bool:
+    """Ask before creating or overwriting a file.
+
+    Args:
+        path: The resolved file that will be written.
+        content: Exactly what will be written to it.
+
+    Returns:
+        True if the user approved.
+    """
+    verb = "OVERWRITE" if path.exists() else "create"
+    shown = content if len(content) <= 2000 else content[:2000] + "\n... (cut short)"
+    print(f"\n{'=' * 60}")
+    print(f"The agent wants to {verb}: {path}")
+    print(f"{'-' * 60}")
+    print(shown)
+    print(f"{'=' * 60}")
+    return _ask("Write this file? [y/N] ")
+
+
+def _as_lines(text: str) -> list[str]:
+    """Split `text` into lines that all end in a newline.
+
+    `difflib` needs this. An edit often replaces a fragment that has no
+    trailing newline (`beta` inside `alpha\\nbeta\\ngamma`), and the
+    missing newline runs the `-old` and `+new` lines together into
+    something that reads as one mangled line.
+    """
+    return [line if line.endswith("\n") else line + "\n"
+            for line in text.splitlines(keepends=True)] or ["\n"]
+
+
+def confirm_edit(path: Path, old: str, new: str) -> bool:
+    """Ask before editing a file, showing a diff of what will change.
+
+    A diff rather than the two strings, because the question the user is
+    answering is "does this do what I expect", and a diff answers that in
+    a way two blobs of text do not.
+
+    Args:
+        path: The resolved file that will be changed.
+        old: The text being replaced.
+        new: The text replacing it.
+
+    Returns:
+        True if the user approved.
+    """
+    diff = difflib.unified_diff(
+        _as_lines(old),
+        _as_lines(new),
+        fromfile=f"{path.name} (current)",
+        tofile=f"{path.name} (proposed)",
+        n=3,
+    )
+    body = "".join(diff)
+    if len(body) > 4000:
+        body = body[:4000] + "\n... (diff cut short)"
+    print(f"\n{'=' * 60}")
+    print(f"The agent wants to edit: {path}")
+    print(f"{'-' * 60}")
+    print(body)
+    print(f"{'=' * 60}")
+    return _ask("Apply this edit? [y/N] ")
+
+
+def confirm_command(command: str) -> bool:
+    """Ask before running a shell command, showing it in full.
+
+    Args:
+        command: The exact command that will be executed.
+
+    Returns:
+        True if the user approved.
+    """
+    print(f"\n{'=' * 60}")
+    print("The agent wants to run this shell command:")
+    print(f"{'-' * 60}")
+    print(f"  {command}")
+    print(f"{'-' * 60}")
+    print(f"It runs in: {config.WORKSPACE_ROOT}")
+    print(f"Timeout: {config.COMMAND_TIMEOUT_SECONDS:.0f}s")
+    print(f"{'=' * 60}")
+    return _ask("Run it? [y/N] ")

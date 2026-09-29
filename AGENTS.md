@@ -55,9 +55,15 @@ marth-ai/
     safety.py        path sandbox + confirmation prompts
     config.py        model name, max steps, workspace root
   tests/
+    conftest.py       shared `project` fixture
     test_tools.py
+    test_write_tools.py
+    test_confirmations.py
     test_safety.py
     test_llm.py
+    test_loop.py
+  check_duplicates.py  dev check: no silently shadowed definitions
+  mutation_check.py    dev check: do the tests notice broken safety code?
 ```
 
 The project directory (`marth-ai/`) is also the default workspace root, so
@@ -82,6 +88,9 @@ another tool that does not exist: that guidance has to be true, because
 the model acts on it and cannot tell the difference between a broken
 promise and a real failure.
 
+`grep` matches plain text, not a regular expression. Models write `.`
+and `(` meaning themselves far more often than they mean a pattern.
+
 ## Safety rules
 
 - All paths must resolve inside the workspace root. Reject anything
@@ -103,10 +112,40 @@ promise and a real failure.
   confirmation that shows exactly what will happen: a diff for edits, the
   full command for shell.
 - Block obviously destructive commands (`rm -rf /`, `format`, etc.) even if
-  the user confirms.
+  the user confirms. A confirmation is not a defence against a command
+  that was never meant to be run, and a model stuck in a loop will ask.
 - Command timeout defaults to 30s. Long output is truncated.
 - The loop stops after a max step count (default 20) so a confused model
   cannot burn the API budget forever.
+
+## Two limits that are not code
+
+- `run_command` is **not** sandboxed by path. A shell command reaches
+  anywhere the user can; the confirmation and the blocklist are the only
+  limits. Keep saying so in the README rather than letting the workspace
+  boundary imply more than it covers.
+- `--yes` skips the confirmation, never the blocklist. The blocklist is a
+  refusal, not a question, so no approval can lift it.
+
+## Verifying safety code
+
+A test that passes no matter what the code does is not a test. Run both
+of these after touching `safety.py` or the write tools:
+
+```bash
+python3 check_duplicates.py             # no silently shadowed definitions
+./.venv/bin/python mutation_check.py     # each safety rule has a test that notices
+```
+
+`check_duplicates.py` exists because `safety.py` once carried two
+complete copies of itself. Python takes the last definition and ignores
+the rest, so the first was dead code, and the tests passed throughout
+because they exercised the copy nobody was reading. Do not reintroduce a
+block by pasting module-level code into the middle of a file.
+
+`mutation_check.py` breaks eleven safety behaviours one at a time and
+requires a test to fail for each one. A mutation that survives means a
+property is untested; fix the test, not the mutation.
 
 ## Working rules
 

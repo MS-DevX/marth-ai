@@ -9,14 +9,13 @@ library.
 
 ## Status
 
-Phase 3 is done. The agent runs a real loop: it sends your task, runs
-whatever tools the model asks for, feeds the results back, and keeps going
-until the model answers. It stops on its own when the model is done, when
-the model starts repeating itself, or when it hits the step limit — and it
-says which one happened.
+Phase 4 is done. The agent can now change things. `write_file`,
+`edit_file`, `grep` and `run_command` all work, and the first three that
+touch your files ask first — showing you the exact change before it
+happens.
 
-Currently available: `list_files`, `read_file` (with line ranges). Write
-tools and confirmations come in Phase 4 — see [Roadmap](#roadmap).
+All six tools are live: `list_files`, `read_file` (with line ranges),
+`write_file`, `edit_file`, `grep`, `run_command`.
 
 ## Setup
 
@@ -54,6 +53,9 @@ python -m agent.main --model gemini-3.1-flash-lite "hello"
 
 # See which models your key can use
 python -m agent.main --list-models
+
+# Approve every write/edit/command without being asked (see below)
+python -m agent.main --yes "add a tests/test_thing.py and run pytest"
 
 # Run entirely on a local model via Ollama (no API key, no rate limit)
 AGENT_PROVIDER=openai python -m agent.main "explain what this repo does"
@@ -108,8 +110,6 @@ environment variables (see `.env.example`):
 
 | Variable | Default | Meaning |
 | --- | --- | --- |
-| Variable | Default | Meaning |
-| --- | --- | --- |
 | `AGENT_PROVIDER` | `gemini` | `gemini` or `openai` (Ollama/Groq/etc) |
 | `AGENT_MODEL` | per provider | Model name |
 | `AGENT_MAX_STEPS` | `20` | Max loop iterations |
@@ -126,6 +126,7 @@ environment variables (see `.env.example`):
 | `AGENT_TIMEOUT` | `300` | Per-request timeout; local models are slow |
 | `AGENT_MAX_RETRIES` | `5` | Retries for a busy or overloaded provider |
 | `AGENT_MAX_RETRY_WAIT` | `60` | Longest single retry wait |
+| `AGENT_YES` | `0` | `1` is the same as `--yes`; skips confirmations |
 
 The workspace root is the sandbox boundary. The agent may only read and
 write files that resolve inside it. By default that is the `marth-ai/`
@@ -149,13 +150,71 @@ instructions aimed at the model, and `.env` is the one file worth
 stealing. Blocking on the filename means the answer does not depend on
 the model choosing to refuse.
 
+## Before anything changes
+
+`write_file`, `edit_file` and `run_command` ask first. You see exactly
+what will happen — the new contents, a diff, or the full command — and
+anything other than `y`/`yes` declines, including just pressing Enter.
+
+`edit_file` needs the text to appear **exactly once**. Zero matches means
+the model guessed at the file and is told to read it again (including
+what the closest actual line was, when there is one). Several matches
+means it cannot be talking about a specific place, so the edit is refused
+rather than applied in the wrong spot.
+
+### Commands that are never run
+
+Some commands are refused outright, without even asking, because a
+confirmation is not a defence against a command that was never meant to
+be run and a model stuck in a loop will happily ask for something
+catastrophic:
+
+| Refused | Examples |
+| --- | --- |
+| Whole-disk deletes | `rm -rf /`, `rm -rf /*`, `rm -rf ~`, `rm -rf $HOME`, `rm -rf ..` |
+| Top-level system dirs | `rm -rf /etc`, `rm -rf /usr`, `rm --recursive --force /` |
+| Disk and filesystem | `mkfs.ext4 /dev/sda1`, `dd of=/dev/sda`, `fdisk`, `shred` |
+| Privilege | `sudo ...`, `passwd`, `chmod 777 /`, `chown -R ... /` |
+| Machine state | `shutdown`, `reboot`, `halt`, `kill -9 1` |
+| Shell profile writes | `echo x > ~/.bashrc` |
+| Piping downloads into a shell | `curl http://x.sh \| sh` |
+| Unrecoverable git | `git push --force` |
+
+The rules are deliberately blunt, in both directions. A false positive
+costs one refused command you can rewrite; a false negative can cost the
+disk. `rm -rf build/` and `rm -rf node_modules` stay allowed, because
+those are ordinary housekeeping and a blocklist that cries wolf gets
+switched off — at which point it protects nothing at all. `git push
+--force-with-lease` is allowed too; only the unrecoverable `--force` is
+refused.
+
+### Two limits worth knowing
+
+**`run_command` is not sandboxed by path.** A shell command can read and
+write anywhere you can; the workspace boundary that governs the file
+tools does not apply to it. The confirmation prompt and the blocklist are
+the only limits. Treat approving a command as approving what that command
+could reach, not just what it appears to do.
+
+**`--yes` turns off the prompt, not the blocklist.** With `--yes`
+(`AGENT_YES=1`) every write, edit and command runs without asking, which
+is what makes the agent usable from a script or a pipeline. Destructive
+commands are still refused, and a banner says so on every run. Without a
+terminal and without `--yes`, the answer is always no: an unattended run
+should not silently do whatever the model asked.
+
 ### Output limits
 
 Every tool result is truncated to `AGENT_MAX_OUTPUT_CHARS` (4000) before it
 reaches the model, at a single choke point in the loop so no tool can skip
 it. Without this, reading one 20 KB source file fills most of an 8K context
 window and the next turn has nowhere to go. Truncated results say how much
-was dropped and suggest `grep` instead of re-reading.
+was dropped, and suggest reading the rest by line range rather than
+repeating the same request.
+
+Long shell output is truncated the same way, and a command that runs past
+`AGENT_COMMAND_TIMEOUT` (30s) is killed and reported as a timeout rather
+than left running.
 
 ## Layout
 
@@ -173,18 +232,41 @@ marth-ai/
     safety.py        path sandbox, secret blocking, truncation, confirmations
     config.py        model name, max steps, workspace root
   tests/
+    conftest.py      shared `project` fixture
     test_tools.py
+    test_write_tools.py
+    test_confirmations.py
     test_safety.py
     test_llm.py
     test_loop.py
+  check_duplicates.py   dev check: no silently shadowed definitions
+  mutation_check.py     dev check: do the tests notice broken safety code?
 ```
+
+### Checking the safety code
+
+Two scripts exist because the important tests here are the ones that fail
+when the code is wrong.
+
+`python3 check_duplicates.py` fails if any module defines the same name
+twice. Python takes the last definition and ignores the rest, so a
+duplicated block is dead code that still reads as though it were live.
+`safety.py` carried 140 such lines during Phase 4 — a full second copy of
+the module — and the tests passed the whole time, because they were
+exercising the copy nobody was looking at.
+
+`./.venv/bin/python mutation_check.py` deliberately breaks eleven safety
+behaviours one at a time (allow `sudo`, make the confirmation default to
+yes, ignore the command timeout, drop the sandbox check) and confirms a
+test catches each one. A safety test that passes no matter what the code
+does is not a test.
 
 ## Roadmap
 
 - [x] Phase 1 — scaffold, config, one-shot Gemini call
 - [x] Phase 2 — `read_file` + `list_files` and one tool round trip
 - [x] Phase 3 — the full agent loop
-- [ ] Phase 4 — `write_file`, `edit_file`, `grep`, `run_command` + confirmations
+- [x] Phase 4 — `write_file`, `edit_file`, `grep`, `run_command` + confirmations
 - [ ] Phase 5 — system prompt, usage docs, wider test coverage
 
 ## The loop
@@ -241,6 +323,19 @@ read_file("agent/llm.py", 200, 260)   ->  [lines 200-260 of 512]
 ```
 
 A range small enough to come back whole beats a whole file that gets cut.
+
+### Finding things without reading everything
+
+`grep` is the other half of that. It searches every file under a
+directory and returns `path:lineno: line`, so the model can locate where
+something is defined without pulling whole files into context one by one.
+
+The pattern is plain text, not a regular expression — models write `.`
+and `(` meaning themselves far more often than they mean a pattern, and
+a regex that fails silently returns nothing, which is worse than an
+exact-but-plain match. It skips `.git`, `.venv`, `node_modules` and
+dotfiles, and silently steps over binary files rather than reporting a
+search failure for them.
 
 ## Rate limits
 

@@ -33,6 +33,15 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         action="store_true",
         help="List the model names this API key can use, then exit.",
     )
+    parser.add_argument(
+        "--yes",
+        action="store_true",
+        help=(
+            "Approve every write, edit and command without asking. "
+            "Destructive commands are still refused. Only use this in a "
+            "throwaway checkout or a container."
+        ),
+    )
     return parser.parse_args(argv)
 
 
@@ -87,12 +96,20 @@ def explain_failure(exc: Exception) -> str:
     return f"Error talking to the model: {type(exc).__name__}: {text}"
 
 
-def ask_model(llm: LLM, task: str) -> str:
+def ask_model(llm: LLM, task: str, auto_approve: bool = False) -> str:
     """Run the agent on a task and return its reply.
+
+    Args:
+        llm: The model to use.
+        task: What the user asked for.
+        auto_approve: Set from `--yes`. Stored on the config object so
+            the tools can reach it without every signature carrying it.
 
     Errors are turned into a short message so the user sees a clean failure
     instead of a stack trace. The API key is never part of what we print.
     """
+    if auto_approve:
+        config.AUTO_APPROVE = True
     try:
         return loop.run(task, llm)
     except RuntimeError as exc:
@@ -138,7 +155,7 @@ def main(argv: list[str] | None = None) -> int:
     print(f"Model:     {args.model or config.MODEL_NAME}\n")
 
     llm = build_llm(args.model)
-    print(loop.run(task, llm))
+    print(ask_model(llm, task, auto_approve=args.yes))
     return 0
 
 
