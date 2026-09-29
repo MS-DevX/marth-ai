@@ -53,6 +53,7 @@ marth-ai/
     llm.py           provider boundary: Gemini + OpenAI-compatible
     tools.py         tool functions + tool schemas
     safety.py        path sandbox + confirmation prompts
+    prompt.py        the system prompt
     config.py        model name, max steps, workspace root
   tests/
     conftest.py       shared `project` fixture
@@ -62,6 +63,7 @@ marth-ai/
     test_safety.py
     test_llm.py
     test_loop.py
+    test_prompt.py
   check_duplicates.py  dev check: no silently shadowed definitions
   mutation_check.py    dev check: do the tests notice broken safety code?
 ```
@@ -90,6 +92,20 @@ promise and a real failure.
 
 `grep` matches plain text, not a regular expression. Models write `.`
 and `(` meaning themselves far more often than they mean a pattern.
+
+## The system prompt
+
+`agent/prompt.py` holds it, prepended to the task rather than sent as a
+system role: Gemini takes its prompt in a config field and the
+OpenAI-compatible shape takes it as a message, so prepending is the one
+form both cannot silently drop.
+
+Every line must answer a failure that actually happened. If a rule no
+longer prevents anything real, delete the rule rather than keeping it
+because it sounds sensible, and drop its entry from `REGRESSION` in
+`tests/test_prompt.py` at the same time. That test is the only thing
+stopping the prompt quietly shrinking or quietly growing, and it is
+worth updating deliberately rather than deleting when it fails.
 
 ## Safety rules
 

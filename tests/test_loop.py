@@ -10,7 +10,7 @@ import json
 
 import pytest
 
-from agent import config, loop
+from agent import config, loop, prompt
 from agent.llm import LLMResponse, Message, ToolCall, ToolResult
 
 
@@ -45,6 +45,65 @@ def call(name: str, **args) -> ToolCall:
 def text_reply(text: str) -> LLMResponse:
     """Build a reply that asks for no tools, i.e. the model is finished."""
     return LLMResponse(text=text)
+
+
+# --- the system prompt reaches the model ----------------------------------
+
+
+def test_the_first_thing_sent_contains_the_system_prompt() -> None:
+    """Without this the whole prompt module is dead weight."""
+    llm = ScriptedLLM([text_reply("done")])
+    loop.run("rename the function", llm)
+    assert prompt.SYSTEM_PROMPT in llm.sent[0][0].text
+
+
+def test_the_task_reaches_the_model_intact() -> None:
+    """Concatenating the prompt must not swallow the request."""
+    llm = ScriptedLLM([text_reply("done")])
+    loop.run("rename compute_total to compute_sum", llm)
+    assert "rename compute_total to compute_sum" in llm.sent[0][0].text
+
+
+def test_the_task_comes_after_the_guidance() -> None:
+    """The request is read last, so it is the freshest thing in context."""
+    llm = ScriptedLLM([text_reply("done")])
+    loop.run("do the thing", llm)
+    text = llm.sent[0][0].text
+    assert text.index(prompt.SYSTEM_PROMPT) < text.index("do the thing")
+
+
+def test_the_prompt_is_resent_every_step() -> None:
+    """The whole conversation is re-sent, so the prompt has to ride along.
+
+    A prompt sent only on the first turn would be compacted away as soon
+    as older turns are dropped.
+    """
+    llm = ScriptedLLM(
+        [
+            LLMResponse(text="", tool_calls=(call("list_files", path="."),)),
+            text_reply("finished"),
+        ]
+    )
+    loop.run("look around", llm)
+    assert len(llm.sent) == 2
+    assert prompt.SYSTEM_PROMPT in llm.sent[1][0].text
+
+
+def test_the_prompt_is_never_compacted_away() -> None:
+    """It is the first message, so compaction would reach it first."""
+    llm = ScriptedLLM(
+        [
+            LLMResponse(text="", tool_calls=(call("list_files", path="."),)),
+            LLMResponse(text="", tool_calls=(call("list_files", path="agent"),)),
+            text_reply("done"),
+        ]
+    )
+    config.MAX_HISTORY_CHARS = 200  # force compaction to bite
+    try:
+        loop.run("look around", llm)
+    finally:
+        config.MAX_HISTORY_CHARS = 24000
+    assert prompt.SYSTEM_PROMPT in llm.sent[-1][0].text
 
 
 # --- stopping conditions --------------------------------------------------

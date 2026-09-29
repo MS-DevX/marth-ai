@@ -14,7 +14,7 @@ to the user rather than being swallowed, because "the agent gave up" and
 import json
 from dataclasses import replace
 
-from . import config, safety, tools
+from . import config, prompt, safety, tools
 from .llm import LLM, Message, ToolResult
 
 # Shown in place of a tool result that has been dropped to fit the context
@@ -140,7 +140,15 @@ def run(task: str, llm: LLM) -> str:
         The model's final answer, or a plain statement of why the run
         stopped early.
     """
-    history: list[Message] = [Message(role="user", text=task)]
+    # The prompt is prepended to the task rather than sent as its own
+    # system role. Gemini takes its system prompt in a config field
+    # rather than in the conversation, and the OpenAI-compatible shape
+    # takes it as a message; plumbing it per provider would mean the two
+    # paths could drift apart silently. Prepending works identically on
+    # both, and cannot be dropped by a provider that ignores it.
+    history: list[Message] = [
+        Message(role="user", text=f"{prompt.SYSTEM_PROMPT}\n\nThe task: {task}")
+    ]
     seen: dict[str, int] = {}
 
     for step in range(1, config.MAX_STEPS + 1):

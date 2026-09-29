@@ -9,13 +9,102 @@ library.
 
 ## Status
 
-Phase 4 is done. The agent can now change things. `write_file`,
-`edit_file`, `grep` and `run_command` all work, and the first three that
-touch your files ask first — showing you the exact change before it
-happens.
+Phase 5 is done. All six tools work, and the model is told how to use
+them: read before editing, prefer the narrower tool, verify your work,
+and treat a declined action as final.
 
-All six tools are live: `list_files`, `read_file` (with line ranges),
-`write_file`, `edit_file`, `grep`, `run_command`.
+## Using it
+
+The agent is a coding assistant with a short leash. Point it at a
+directory and give it a task in plain English:
+
+```bash
+cd marth-ai
+python -m agent.main "explain what agent/loop.py does"
+python -m agent.main "add a --verbose flag to main.py, then run the tests"
+python -m agent.main                     # prompts for the task
+```
+
+It reads, edits and runs commands on its own, asking before each change.
+Because it asks, **run it in a terminal** — with no terminal there is
+nothing to ask, and the answer is no.
+
+### Running against your own code
+
+By default the agent is sandboxed to the `marth-ai` directory, which is
+not very useful for real work. Point it somewhere else:
+
+```bash
+AGENT_WORKSPACE=~/projects/myapp python -m agent.main "add type hints to stats.py"
+```
+
+The agent's first move will be `list_files`, so you can see it has found
+the right place. It stays inside that directory for file tools; shell
+commands do not (see below).
+
+### Reviewing before it happens
+
+Every change is shown before it is made, and you approve with `y`:
+
+```
+============================================================
+The agent wants to edit: stats.py
+------------------------------------------------------------
+--- stats.py (current)
++++ stats.py (proposed)
+@@ -12,3 +12,3 @@
+-    return sum(values)
++    return sum(values, start)
+============================================================
+Apply this edit? [y/N]
+```
+
+Anything else declines. After declining, the agent explains what it
+wanted and stops — it does not ask again, so there is no way to get
+trapped approving something you did not read.
+
+To approve everything instead (CI, a script, a throwaway checkout):
+
+```bash
+python -m agent.main --yes "..."
+```
+
+### When it stops
+
+The loop ends in one of three ways, and says which:
+
+| Stop | What it prints |
+| --- | --- |
+| Finished | The model's own summary of what it did |
+| Repeating | The same tool call with the same arguments, three times running |
+| Step limit | Told it hit `MAX_STEPS`, with the suggestion to raise it |
+
+A refusal mid-run (you declined an edit) shows up as the agent
+describing what it wanted to do and stopping, not as an error.
+
+### When it goes wrong
+
+**It claims something works without checking.** The prompt tells it to
+run the tests and to say plainly what it ran. If it reports success
+without showing you output, it did not verify.
+
+**It stops early and tells you to raise the limit.** Raise it:
+
+```bash
+AGENT_MAX_STEPS=40 python -m agent.main "..."
+```
+
+**It reasons about a file it only partly saw.** Tool output is cut at
+4000 characters. The truncation notice says how much is missing; the fix
+is for the model to re-read with `start_line` and `end_line`. If it
+counts things it never fully read, raise `AGENT_MAX_OUTPUT_CHARS` or
+have it use `grep`.
+
+**A local model is wrong in a specific way.** 8B models drop entries
+from directory listings, miscount truncated files, and call tools that
+do not exist. `granite4.1:8b` was noticeably more accurate than
+`lfm2.5:8b` on the same tasks. A cloud model makes these far rarer, at
+the cost of a daily quota.
 
 ## Setup
 
@@ -230,6 +319,7 @@ marth-ai/
     llm.py           provider boundary: Gemini + OpenAI-compatible
     tools.py         tool functions + tool schemas
     safety.py        path sandbox, secret blocking, truncation, confirmations
+    prompt.py        the system prompt, and why each line is there
     config.py        model name, max steps, workspace root
   tests/
     conftest.py      shared `project` fixture
@@ -239,6 +329,7 @@ marth-ai/
     test_safety.py
     test_llm.py
     test_loop.py
+    test_prompt.py
   check_duplicates.py   dev check: no silently shadowed definitions
   mutation_check.py     dev check: do the tests notice broken safety code?
 ```
@@ -267,7 +358,39 @@ does is not a test.
 - [x] Phase 2 — `read_file` + `list_files` and one tool round trip
 - [x] Phase 3 — the full agent loop
 - [x] Phase 4 — `write_file`, `edit_file`, `grep`, `run_command` + confirmations
-- [ ] Phase 5 — system prompt, usage docs, wider test coverage
+- [x] Phase 5 — system prompt, usage docs, wider test coverage
+
+Not planned, and worth saying out loud: this is a small agent for one
+person's projects. It has no support for structured output beyond what
+the tools return, no retry-on-tool-failure logic in the model itself,
+no multi-agent anything, and no web access.
+
+## How the model is told what to do
+
+`agent/prompt.py` holds the system prompt. It is prepended to the task
+rather than sent as a separate system role, because Gemini takes its
+system prompt in a config field and the OpenAI-compatible shape takes
+it as a message; prepending works identically on both and cannot be
+silently dropped by a provider that ignores it.
+
+Every line in it answers a failure that actually happened while
+building this agent:
+
+| Failure | What the prompt says |
+| --- | --- |
+| Counted 8 of 32 tests in a file it had only seen 28% of | Do not reason about a file you have only partly seen; do not count what you did not read |
+| Edited using text it guessed at | Read before you change anything; read what you wrote before editing again |
+| Called `confirm_write`, which did not exist, then used the shell instead | Only use the tools you were given; say so if you need another, do not invent it |
+| Re-asked for an action after it was declined | A refusal is a decision, not a retry; explain and stop |
+| Finished without checking | Run the tests, or run what you changed, and say what it printed |
+| Kept going with no idea how many steps were left | You will be told about the step limit |
+| Assumed a truncation limit that did not exist | The real number, which is asserted against `config` in a test |
+
+`tests/test_prompt.py` checks each of those phrases is present, so a
+rule cannot be quietly deleted. It also fails on an unfilled `{}`
+placeholder and on the prompt growing past 700 words, since it is
+re-sent on every single step and competes with tool output for a small
+context window.
 
 ## The loop
 
@@ -366,3 +489,17 @@ another: `gemini-3.5-flash-lite` and `gemini-3.1-flash-lite` have been
 reliable where `gemini-3.5-flash` was not.
 
 For unlimited testing, use the local provider instead.
+
+## A note on the Gemini role format
+
+Function results go back to Gemini under `role="user"`, not
+`role="tool"`. The API used to accept a `tool` role and no longer does;
+it answers `400 INVALID_ARGUMENT: Role 'tool' is not supported`, with no
+hint about what it wants instead. This was found by running the agent
+against the live endpoint during Phase 5, not by reading the docs — the
+published function-calling guide now leads with a newer Interactions API
+and no longer shows this request shape at all.
+
+Check `llm.py` against the current docs before changing it, and verify
+against a real request rather than trusting a snippet that happens to
+look plausible.
