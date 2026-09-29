@@ -13,10 +13,47 @@ from pathlib import Path
 # The ONLY place a model name appears in the project.
 #
 # Note: `gemini-2.5-flash` is listed by the models API but is rejected for
-# newer accounts, so it is not a safe default. This default was verified to
-# serve a real request. Override it with AGENT_MODEL if you need another.
-DEFAULT_MODEL = "gemini-3.5-flash"
-MODEL_NAME = os.environ.get("AGENT_MODEL", DEFAULT_MODEL)
+# newer accounts, so it is not a safe default. The Gemini default below was
+# verified to serve a real request.
+#
+# Which provider to talk to: "gemini" or "openai" (Ollama, Groq, ...).
+# Gemini stays the default so nothing changes until you opt in.
+PROVIDER = os.environ.get("AGENT_PROVIDER", "gemini").strip().lower()
+
+# Per-provider defaults, so a single AGENT_MODEL override works for both.
+DEFAULT_MODELS = {
+    "gemini": "gemini-3.5-flash",
+    "openai": "lfm2.5:8b",
+}
+DEFAULT_MODEL = DEFAULT_MODELS.get(PROVIDER, DEFAULT_MODELS["gemini"])
+MODEL_NAME = os.environ.get("AGENT_MODEL", "").strip() or DEFAULT_MODEL
+
+# --- OpenAI-compatible providers -----------------------------------------
+# Ollama, Groq, and OpenRouter all expose the same OpenAI-shaped HTTP API,
+# so one class in llm.py covers all three.
+OPENAI_BASE_URL = os.environ.get(
+    "OPENAI_BASE_URL", "http://localhost:11434/v1"
+).rstrip("/")
+# Local servers ignore this, but cloud providers require it.
+OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "ollama")
+
+# Context window requested from the model. Ollama's own default is 4096,
+# which is tight once a tool returns a whole file.
+CONTEXT_TOKENS = int(os.environ.get("AGENT_CONTEXT_TOKENS", "8192"))
+
+# Hybrid "thinking" models spend seconds per turn emitting reasoning tokens
+# before every tool call. Tool-calling turns do not benefit from that, so
+# it is off by default. Set to 1 to see the reasoning.
+THINKING_ENABLED = os.environ.get("AGENT_THINKING", "0") == "1"
+
+# Cloud APIs answer in seconds; a local model prefilling a large file on
+# CPU can take much longer, so the ceiling has to be generous.
+REQUEST_TIMEOUT_SECONDS = float(os.environ.get("AGENT_TIMEOUT", "300"))
+
+# How many times to retry a request that hit a rate limit, and the longest
+# single wait. The API tells us how long to wait via `retryDelay`.
+MAX_RATE_LIMIT_RETRIES = int(os.environ.get("AGENT_MAX_RETRIES", "5"))
+MAX_RETRY_WAIT_SECONDS = float(os.environ.get("AGENT_MAX_RETRY_WAIT", "60"))
 
 # The project directory, used to find .env reliably no matter where the
 # agent is launched from.
@@ -33,6 +70,10 @@ COMMAND_TIMEOUT_SECONDS = float(os.environ.get("AGENT_COMMAND_TIMEOUT", "30"))
 # Tool output longer than this is truncated before it is sent back to the
 # model (truncation keeps the conversation small and cheap).
 MAX_OUTPUT_CHARS = int(os.environ.get("AGENT_MAX_OUTPUT_CHARS", "4000"))
+
+# read_file refuses anything bigger than this rather than truncating,
+# because silently returning half a file can mislead the model.
+MAX_FILE_BYTES = int(os.environ.get("AGENT_MAX_FILE_BYTES", "512000"))
 
 # --- Sandbox -------------------------------------------------------------
 # The one directory the agent is allowed to read and write: the project

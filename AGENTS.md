@@ -26,7 +26,11 @@ feeds the results back, looping until the task is done.
   `python -m agent.main --list-models` before changing the default, since a
   model can be listed yet still be rejected on use.
 - The LLM call lives behind a small interface in `llm.py` so the provider
-  can be swapped later. Nothing outside `llm.py` may import `google.genai`.
+  can be swapped later. Nothing outside `llm.py` may import `google.genai`
+  or make HTTP calls itself.
+- Two providers ship: `GeminiLLM` (google-genai SDK) and `OpenAICompatLLM`
+  (stdlib `urllib`, for Ollama/Groq/OpenRouter). Select with
+  `AGENT_PROVIDER`. Do not add a third without agreeing first.
 
 ## Structure
 
@@ -41,13 +45,14 @@ marth-ai/
     __init__.py
     main.py          CLI entry: read task, run loop
     loop.py          the agent loop
-    llm.py           Gemini wrapper
+    llm.py           provider boundary: Gemini + OpenAI-compatible
     tools.py         tool functions + tool schemas
     safety.py        path sandbox + confirmation prompts
     config.py        model name, max steps, workspace root
   tests/
     test_tools.py
     test_safety.py
+    test_llm.py
 ```
 
 The project directory (`marth-ai/`) is also the default workspace root, so

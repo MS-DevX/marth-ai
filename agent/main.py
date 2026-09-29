@@ -8,7 +8,7 @@ import sys
 
 from dotenv import load_dotenv
 
-from . import config
+from . import config, loop
 from .llm import LLM, build_llm
 
 
@@ -44,14 +44,13 @@ def read_task(argument: str | None) -> str:
 
 
 def ask_model(llm: LLM, task: str) -> str:
-    """Send one task to the model and return its reply.
+    """Run the agent on a task and return its reply.
 
-    Errors from the model are turned into a short message so the user sees
-    a clean failure instead of a stack trace. The API key is never part of
-    the message we print.
+    Errors are turned into a short message so the user sees a clean failure
+    instead of a stack trace. The API key is never part of what we print.
     """
     try:
-        return llm.send(task)
+        return loop.run_once(task, llm)
     except RuntimeError as exc:
         # Our own config errors (e.g. missing API key) already read well.
         return f"Configuration error: {exc}"
@@ -88,8 +87,10 @@ def main(argv: list[str] | None = None) -> int:
         print("No task given. Nothing to do.")
         return 1
 
-    # Printed every run so the sandbox boundary is never a surprise.
+    # Printed every run so the sandbox boundary and the target model are
+    # never a surprise.
     print(f"Workspace: {config.WORKSPACE_ROOT}")
+    print(f"Provider:  {config.PROVIDER}")
     print(f"Model:     {args.model or config.MODEL_NAME}\n")
 
     llm = build_llm(args.model)
