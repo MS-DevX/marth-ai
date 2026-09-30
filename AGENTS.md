@@ -48,13 +48,17 @@ marth-ai/
   .gitignore
   agent/
     __init__.py
-    main.py          CLI entry: read task, run loop
+    main.py          CLI entry: read task, run loop, print a summary
     loop.py          the agent loop
     llm.py           provider boundary: Gemini + OpenAI-compatible
     tools.py         tool functions + tool schemas
     safety.py        path sandbox + confirmation prompts
     prompt.py        the system prompt
     config.py        model name, max steps, workspace root
+    runs.py          what a run did: the record every view reads
+    history.py       writing that record to disk, and reading it back
+    tui.py           the live curses dashboard
+    report.py        the plain-text log and the end-of-run summary
   tests/
     conftest.py       shared `project` fixture
     test_tools.py
@@ -64,6 +68,13 @@ marth-ai/
     test_llm.py
     test_loop.py
     test_prompt.py
+    test_refusal_contract.py
+    test_runs.py
+    test_history.py
+    test_history_cli.py
+    test_report.py
+    test_tui.py
+    test_dashboard_e2e.py
   check_duplicates.py  dev check: no silently shadowed definitions
   mutation_check.py    dev check: do the tests notice broken safety code?
 ```
@@ -92,6 +103,56 @@ promise and a real failure.
 
 `grep` matches plain text, not a regular expression. Models write `.`
 and `(` meaning themselves far more often than they mean a pattern.
+
+## The run record
+
+`runs.py` holds what a run is: the task, the tool calls, the outcome.
+`tui.py`, `report.py` and `history.py` all render that one record and
+none of them may define a second, slightly different version of it. It is
+plain data with no behaviour, so a run can be compared in a test with no
+terminal in sight.
+
+`loop.run_record()` returns the record and fires `on_event` as each step
+completes. The live views subscribe to the callback. They must not poll
+the loop, and the loop must not know a view exists.
+
+## Reporting a tool failure
+
+Tools return a `Result`: a `str` subclass carrying `status` (`ok`,
+`declined`, `blocked`, `error`) and `approved`. The model sees the text;
+the dashboard and the history file see the status.
+
+Do not read the status back out of the text. That was tried and it failed
+both ways: a write refused by the sandbox was recorded as `ok` and listed
+under "Changed:", and a file the model read containing the words
+"declined by the user" was recorded as a refusal. Anything the model reads
+can contain any text at all, including this repository's own source.
+
+A tool that returns a message instead of raising must return
+`tools.failed(...)`, or the run records a failure as a success. A search
+that found nothing, and a command that exited non-zero, are *not*
+failures: they are the answers the model asked for. A command killed at
+the timeout is.
+
+## Confirming while curses owns the screen
+
+`input()` cannot work on a screen curses is drawing, so `safety` asks
+through `set_ask_handler()`. The handler is `None` everywhere except under
+the dashboard, which suspends curses, asks, and resumes. Keep it that way:
+`safety.py` must not import curses, and `--plain` must need no special
+case because it never installs a handler.
+
+## The history file
+
+`runs/` under the workspace, one JSONL file per run, appended as the run
+proceeds so an interrupted run still has a record. A file with no footer
+is a run that was still going, and is shown as such.
+
+Run logs go *inside* the workspace rather than in a user-wide config
+directory, and they are gitignored. A user who would rather the agent
+wrote nothing outside the task at all can turn them off with
+`--no-history`; that is a choice, not a fallback, so do not make the log
+optional for reasons of convenience.
 
 ## The system prompt
 
@@ -162,6 +223,31 @@ block by pasting module-level code into the middle of a file.
 `mutation_check.py` breaks eleven safety behaviours one at a time and
 requires a test to fail for each one. A mutation that survives means a
 property is untested; fix the test, not the mutation.
+
+## Testing the dashboard
+
+`tests/test_dashboard_e2e.py` runs the real CLI in a real pty, because the
+three things most likely to break cannot be seen any other way: the
+alternate screen being entered, the terminal being handed back, and
+confirmations arriving on the screen curses is drawing.
+
+Three requirements, each learned the hard way:
+
+- **Fork, do not `execve`.** The child needs the monkeypatched model and
+  the patched ask handler. `execve` replaces the process image and throws
+  both away, and the run then tries to reach a real model.
+- **Rebind `sys.stdout` to fd 1 in the child.** Curses writes to the file
+  descriptor, not to the Python object, so a suite that has captured
+  stdout leaves curses drawing into a buffer nobody reads.
+- **Set the window size with `TIOCSWINSZ`.** A pty defaults to 0x0, and
+  `available()` correctly refuses a window that small. The dashboard never
+  starts and the test passes for the wrong reason.
+
+These tests really do run `write_file`, so give them a temporary workspace
+and assert the repository was not written to. `config.WORKSPACE_ROOT` is
+patched in the parent rather than through `AGENT_WORKSPACE`, because
+`config` was imported long before an environment variable set in a test
+would be read.
 
 ## Working rules
 

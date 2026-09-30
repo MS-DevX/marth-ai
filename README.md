@@ -9,9 +9,8 @@ library.
 
 ## Status
 
-Phase 5 is done. All six tools work, and the model is told how to use
-them: read before editing, prefer the narrower tool, verify your work,
-and treat a declined action as final.
+Phase 7 is done. All six tools work, the model is told how to use them,
+and every run is watchable live and readable afterwards.
 
 ## Using it
 
@@ -28,6 +27,89 @@ python -m agent.main                     # prompts for the task
 It reads, edits and runs commands on its own, asking before each change.
 Because it asks, **run it in a terminal** — with no terminal there is
 nothing to ask, and the answer is no.
+
+### Watching a run
+
+While the agent works, the screen shows what it is doing: the task, the
+model, and a running log of each tool call with one line of what came
+back. A refused call is marked `!` in amber, a blocked one `X` in red, and
+a call that failed `E` — so a run where the agent kept asking for things
+you said no to does not look like a run where everything worked.
+
+Confirmations appear on the same screen, one `y`/`n` keystroke each,
+instead of dropping you out to a shell prompt and back.
+
+The dashboard needs a real terminal. With a pipe, a small window, or
+`--yes` (nothing to approve) it steps aside and prints a plain log
+instead, and says nothing rather than drawing escape sequences over your
+output. Confirmations still work either way — the prompt is the same
+`y`/`n` you would get without a dashboard:
+
+```bash
+python -m agent.main --plain "..."          # force the plain log
+```
+
+The plain log is not a lesser view. It prints the same lines, the same
+markers and the same summary:
+
+```
+  [      ok] read_file(path=stats.py)  (0.01s)
+           def total(values):
+  [      ok] edit_file(path=stats.py, old=sum(values), new=sum(values, 0))  (0.01s)
+           Edited stats.py (1 replacement, 11 -> 14 chars).
+  [ declined] write_file(path=report.md, content=...)  (0.00s)
+           Declined by the user. Nothing was written to report.md.
+
+  finished in 4 calls, 5 steps, 41s
+  3 ok, 1 declined
+
+  Changed:
+    stats.py
+```
+
+Note the `declined` row is counted separately from `ok`, and the file it
+wanted to write is not under **Changed**. A run that looks finished but
+had three refusals is not the same as one that did what it was asked.
+
+One line of each result is all either view shows, because a whole file
+would be unreadable in a log and useless in a column. The rest is in the
+history file.
+
+### Looking at earlier runs
+
+Every run is written to `.marth-ai/runs/` as it happens, so a run can be
+read back afterwards — including one that was interrupted, or one you
+want to check claims against.
+
+```bash
+python -m agent.main --history              # recent runs, newest first
+python -m agent.main --run 20260930-141203-a7f1   # one run in full
+```
+
+```
+  run id                   when         outcome     steps  task
+  ------------------------ ------------ ----------- -----  ------------------
+  20260930-141203-a7f1     09-30 14:12  finished        6  add a --verbose flag
+  20260930-120455-3c09     09-30 12:04  step_limit     2  rename compute_total
+  20260930-091203-ee51     09-30 09:12  finished       14  explain loop.py
+```
+
+`--run` takes the id from the first column, and a prefix of it works. A
+prefix matching more than one run says so rather than quietly showing you
+the newest of them, because you asked about one run and would be reading
+another's output as though it were this one's.
+
+`--run` prints the whole thing: the task, every call with its arguments
+and full output, and the answer. This is the way to find out what actually
+happened after a run you did not watch.
+
+The log is written as the run proceeds, not at the end, so a run killed
+mid-step still has a record — and one with no final line is shown as
+`running`, which is what it was.
+
+Turn it off with `--no-history` (`AGENT_NO_HISTORY=1`) if you would
+rather the agent wrote nothing outside the workspace at all. The
+directory is gitignored either way.
 
 ### Running against your own code
 
@@ -146,6 +228,19 @@ python -m agent.main --list-models
 # Approve every write/edit/command without being asked (see below)
 python -m agent.main --yes "add a tests/test_thing.py and run pytest"
 
+# Watch it work on the live dashboard (the default in a real terminal)
+python -m agent.main "add type hints to stats.py"
+
+# Print a plain log instead - needed when piping, and honest for scripts
+python -m agent.main --plain "add type hints to stats.py"
+
+# Review what previous runs did
+python -m agent.main --history
+python -m agent.main --run 20260930-141203-a7f1
+
+# Do not write a run log at all
+python -m agent.main --no-history "explain what this repo does"
+
 # Run entirely on a local model via Ollama (no API key, no rate limit)
 AGENT_PROVIDER=openai python -m agent.main "explain what this repo does"
 ```
@@ -216,6 +311,8 @@ environment variables (see `.env.example`):
 | `AGENT_MAX_RETRIES` | `5` | Retries for a busy or overloaded provider |
 | `AGENT_MAX_RETRY_WAIT` | `60` | Longest single retry wait |
 | `AGENT_YES` | `0` | `1` is the same as `--yes`; skips confirmations |
+| `AGENT_NO_HISTORY` | `0` | `1` is the same as `--no-history`; writes no run log |
+| `AGENT_MAX_HISTORY_RUNS` | `200` | Oldest run logs deleted past this many |
 
 The workspace root is the sandbox boundary. The agent may only read and
 write files that resolve inside it. By default that is the `marth-ai/`
@@ -314,13 +411,17 @@ marth-ai/
   requirements.txt
   .env.example
   agent/
-    main.py          CLI entry: read task, run loop
+    main.py          CLI entry: read task, run loop, print a summary
     loop.py          the agent loop + the tool-output truncation choke point
     llm.py           provider boundary: Gemini + OpenAI-compatible
     tools.py         tool functions + tool schemas
     safety.py        path sandbox, secret blocking, truncation, confirmations
     prompt.py        the system prompt, and why each line is there
     config.py        model name, max steps, workspace root
+    runs.py          what a run did: the record every view reads
+    history.py       writing that record to disk, and reading it back
+    tui.py           the live curses dashboard
+    report.py        the plain-text log and the end-of-run summary
   tests/
     conftest.py      shared `project` fixture
     test_tools.py
@@ -330,6 +431,13 @@ marth-ai/
     test_llm.py
     test_loop.py
     test_prompt.py
+    test_refusal_contract.py
+    test_runs.py
+    test_history.py
+    test_history_cli.py
+    test_report.py
+    test_tui.py
+    test_dashboard_e2e.py
   check_duplicates.py   dev check: no silently shadowed definitions
   mutation_check.py     dev check: do the tests notice broken safety code?
 ```
@@ -359,6 +467,8 @@ does is not a test.
 - [x] Phase 3 — the full agent loop
 - [x] Phase 4 — `write_file`, `edit_file`, `grep`, `run_command` + confirmations
 - [x] Phase 5 — system prompt, usage docs, wider test coverage
+- [x] Phase 6 — the run record, the history file, the summary
+- [x] Phase 7 — the live curses dashboard and the run viewer
 
 Not planned, and worth saying out loud: this is a small agent for one
 person's projects. It has no support for structured output beyond what
@@ -459,6 +569,58 @@ a regex that fails silently returns nothing, which is worse than an
 exact-but-plain match. It skips `.git`, `.venv`, `node_modules` and
 dotfiles, and silently steps over binary files rather than reporting a
 search failure for them.
+
+## The dashboard
+
+Two views over one record. `agent/runs.py` defines what a run *is* — the
+task, the tool calls, the outcome — and the other three modules render it:
+`tui.py` live, `report.py` for the summary, `history.py` for the file on
+disk. Nothing in `runs.py` draws anything, so the record can be compared
+in a test with no terminal anywhere in sight.
+
+`loop.run_record()` returns that record and takes an `on_event` callback
+that fires as each step completes. The dashboard subscribes to that and
+redraws; the plain log subscribes to the same callback and prints. One
+loop, two observers, and neither of them has to poll or know the other
+exists.
+
+### How a confirmation works while curses owns the screen
+
+This is the one genuinely awkward part. `safety.py` asks by calling
+`input()`, and `input()` cannot work on a screen curses is drawing.
+
+So `safety` asks through an indirection:
+
+```python
+safety.set_ask_handler(Dashboard.ask)   # curses suspends, asks, resumes
+```
+
+`Dashboard.ask` calls `curses.endwin()`, runs the normal `input()` prompt
+against the real terminal, then `curses.doupdate()` and redraws. The
+prompt is the familiar one, and the log has no hole where it was. The
+handler is `None` everywhere else, so `safety.py` has no idea a dashboard
+exists — and `--plain` needs no special case, because it simply never
+installs one.
+
+### How a call knows it failed
+
+Tools return a `Result`, which is a `str` subclass carrying a `status`:
+`ok`, `declined`, `blocked` or `error`. The model sees the text; the
+dashboard and the history file see the status.
+
+The status used to be guessed afterwards, by searching the text for words
+like "declined by the user". That failed in both directions, and both
+failures were real:
+
+- a write outside the workspace was refused correctly and then recorded
+  as `ok`, so the history listed a refused write under **Changed:**
+- a file the model read that happened to contain the words "declined by
+  the user" was recorded as a refusal
+
+The status is known at the moment the call happens, so it is reported
+there. `tests/test_refusal_contract.py` covers every route a call can
+fail by, because a route nobody checks is a route that silently records
+itself as a success.
 
 ## Rate limits
 

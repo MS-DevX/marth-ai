@@ -118,6 +118,16 @@ WORKSPACE_ROOT = Path(
 # file tools and this is the agent writing about itself.
 HISTORY_DIRNAME = ".marth-ai"
 
+# Set AGENT_NO_HISTORY=1 to stop recording runs. Useful for a one-off
+# command on someone else's repository, where leaving a directory behind
+# would be rude.
+HISTORY_ENABLED = os.environ.get("AGENT_NO_HISTORY", "0") != "1"
+
+# How many past runs to keep. Each file holds one run, so trimming means
+# deleting the oldest files by name; the name starts with a timestamp,
+# which sorts chronologically without reading any of them.
+MAX_HISTORY_RUNS = int(os.environ.get("AGENT_MAX_HISTORY_RUNS", "200"))
+
 # The placeholder value shipped in .env.example. If we see it, the user
 # copied the example file but never filled in a real key.
 _PLACEHOLDER_KEY = "your_key_here"

@@ -1,16 +1,19 @@
 """Command line entry point.
 
-Starts the agent on a task and prints what it did. Each tool call is
-logged as it happens, followed by a summary of the whole run, because
-"the agent finished" and "the agent gave up" look identical otherwise.
+Starts the agent on a task, or shows what it did on a past one. Three
+output modes: a curses dashboard while the run works, one line per tool
+call when there is no usable terminal, and the stored history when
+asked for. All three end with the same summary, because that is the
+part worth reading afterwards.
 """
 
 import argparse
 import sys
+from collections.abc import Callable
 
 from dotenv import load_dotenv
 
-from . import config, llm, loop, report
+from . import config, history, llm, loop, report, tui
 from .llm import LLM, build_llm
 from .runs import Run
 
@@ -44,6 +47,27 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             "Destructive commands are still refused. Only use this in a "
             "throwaway checkout or a container."
         ),
+    )
+    parser.add_argument(
+        "--history",
+        action="store_true",
+        help="List past runs and exit.",
+    )
+    parser.add_argument(
+        "--run",
+        default=None,
+        metavar="ID",
+        help="Show one past run in full. The ID is the first column of --history.",
+    )
+    parser.add_argument(
+        "--plain",
+        action="store_true",
+        help="Skip the live dashboard and print one line per tool call.",
+    )
+    parser.add_argument(
+        "--no-history",
+        action="store_true",
+        help="Do not record this run. Nothing is written to .marth-ai/.",
     )
     return parser.parse_args(argv)
 
@@ -111,33 +135,80 @@ def list_models(llm: LLM) -> list[str]:
 # --- running a task --------------------------------------------------------
 
 
-def run_task(task: str, model: LLM) -> Run:
+def run_task(
+    task: str,
+    model: LLM,
+    *,
+    live: bool = True,
+    record: bool = True,
+) -> Run:
     """Run the agent on a task and return the full record.
 
     Args:
         task: What the user asked for.
         model: The model to use.
+        live: Show the curses dashboard rather than plain lines.
+        record: Write the run to the history directory.
 
-    Fills in the record it is given rather than returning a new one, so
-    the object being drawn and the object being summarised are the same.
+    The history log and whatever view is on screen are both observers
+    on the same loop, so they are composed here rather than inside
+    `loop.run_record`: the loop should not know that either exists.
     """
     run = Run(task=task, model=model.model_name, provider=config.PROVIDER)
-    return loop.run_record(task, model, report.LiveLog(), run)
+    log = history.RunLog(run) if record else None
+
+    def work(view: Callable[[Run], None] | None) -> Run:
+        """Run the loop with the log and the view both watching.
+
+        Fills in `run` rather than making a new record, so the object
+        the dashboard is drawing and the object that gets summarised are
+        the same one.
+        """
+
+        def observe(current: Run) -> None:
+            """Record the newest call, then let the view redraw."""
+            if log is not None and len(current.calls) > log.written:
+                log.write_call(current.calls[-1])
+            if view is not None:
+                view(current)
+
+        if log is not None:
+            log.open()
+        return loop.run_record(task, model, observe if (log or view) else None, run)
+
+    if live and tui.available():
+        finished = tui.run_with_dashboard(run, work)
+    else:
+        finished = work(report.LiveLog())
+
+    if log is not None:
+        # Closed here rather than inside `work`, because the outcome is
+        # only known once the loop has returned.
+        log.close(finished.answer, str(finished.outcome), finished.error)
+    return finished
 
 
-def run_and_report(task: str, model: LLM) -> str:
+def run_and_report(
+    task: str,
+    model: LLM,
+    *,
+    live: bool = True,
+    record: bool = True,
+) -> str:
     """Run a task, print the outcome, and return the final text.
 
     Args:
         task: What the user asked for.
         model: The model to use.
+        live: Show the curses dashboard rather than plain lines.
+        record: Write the run to the history directory.
 
     Errors are turned into a short message so the user sees a clean
     failure instead of a stack trace. The API key is never part of what
     we print.
     """
     try:
-        run = run_task(task, model)
+        run = run_task(task, model, live=live, record=record)
     except RuntimeError as exc:
         # Our own config errors (e.g. missing API key) already read well.
         return f"Configuration error: {exc}"
@@ -146,6 +217,47 @@ def run_and_report(task: str, model: LLM) -> str:
 
     report.summary(run)
     return run.answer
+
+
+# --- history commands ------------------------------------------------------
+
+
+def show_history() -> int:
+    """Print the list of past runs. Returns a process exit code."""
+    runs = []
+    for path in history.list_runs():
+        try:
+            runs.append(history.load_run(path))
+        except (OSError, ValueError) as exc:
+            # One unreadable file should not hide the other 199.
+            print(f"  [skipping {path.name}: {exc}]", file=sys.stderr)
+    report.listing(runs)
+    return 0
+
+
+def show_run(run_id: str) -> int:
+    """Print one past run in full. Returns a process exit code."""
+    matches = [path for path in history.list_runs() if path.name.startswith(run_id)]
+    if not matches:
+        print(f"No run matching {run_id!r}. Try --history to see what is there.")
+        return 1
+    if len(matches) > 1:
+        # Prefixes are allowed because the timestamp part of an id is
+        # guessable, but guessing wrong must not silently show a
+        # different run: the user asked about one run and would be reading
+        # another's output as though it were this one's.
+        print(
+            f"{run_id!r} matches {len(matches)} runs: "
+            f"{', '.join(path.stem for path in matches[:4])}. "
+            f"Use more of the id."
+        )
+        return 1
+    try:
+        report.detail(history.load_run(matches[0]))
+        return 0
+    except (OSError, ValueError) as exc:
+        print(f"  Could not read {matches[0].name}: {exc}", file=sys.stderr)
+        return 1
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -157,6 +269,10 @@ def main(argv: list[str] | None = None) -> int:
 
     args = parse_args(argv)
 
+    if args.history:
+        return show_history()
+    if args.run:
+        return show_run(args.run)
     if args.list_models:
         for name in list_models(build_llm(args.model)):
             print(name)
@@ -164,6 +280,8 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.yes:
         config.AUTO_APPROVE = True
+    if args.no_history:
+        config.HISTORY_ENABLED = False
 
     task = read_task(args.task)
     if not task:
@@ -177,7 +295,7 @@ def main(argv: list[str] | None = None) -> int:
     print(f"Model:     {args.model or config.MODEL_NAME}\n")
 
     model = build_llm(args.model)
-    print(run_and_report(task, model))
+    print(run_and_report(task, model, live=not args.plain, record=config.HISTORY_ENABLED))
     return 0
 
 
