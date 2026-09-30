@@ -7,6 +7,11 @@ __pycache__/
 .venv/
 venv/
 
+# Packaging: build output and the metadata setuptools writes
+build/
+dist/
+*.egg-info/
+
 # Tooling
 .pytest_cache/
 .mypy_cache/

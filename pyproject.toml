@@ -1,0 +1,40 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "marth-ai"
+description = "A small terminal coding agent: hand-written loop, sandboxed tools, live dashboard."
+readme = "README.md"
+requires-python = ">=3.11"
+dynamic = ["version"]
+
+# Runtime only. pytest is deliberately not here: it belongs to the extra
+# below, so installing the agent does not drag a test runner onto
+# everyone's machine. tests/test_packaging.py fails if the two drift.
+dependencies = [
+    "google-genai>=2.25.0",
+    "python-dotenv>=1.0.0",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0.0"]
+
+[project.scripts]
+# The command a user types. main() returns the process exit code, which
+# is what a console script is expected to hand to sys.exit().
+marth = "agent.main:main"
+
+[tool.setuptools]
+# Named explicitly rather than auto-discovered. Auto-discovery would
+# sweep up tests/ and the two dev scripts at the repo root and install
+# them as top-level importable modules.
+packages = ["agent"]
+
+[tool.setuptools.dynamic]
+# Read from agent/__init__.py so the version cannot drift from the tag.
+# That file must stay import-cheap: setuptools imports it to read this.
+version = { attr = "agent.__version__" }
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

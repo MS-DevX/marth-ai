@@ -43,22 +43,25 @@ feeds the results back, looping until the task is done.
 marth-ai/
   AGENTS.md
   README.md
-  requirements.txt
+  pyproject.toml      packaging: the `marth` command, the deps, the version
+  requirements.txt    the same deps, for a plain `pip install -r`
   .env.example
   .gitignore
   agent/
-    __init__.py
-    main.py          CLI entry: read task, run loop, print a summary
-    loop.py          the agent loop
-    llm.py           provider boundary: Gemini + OpenAI-compatible
-    tools.py         tool functions + tool schemas
-    safety.py        path sandbox + confirmation prompts
-    prompt.py        the system prompt
-    config.py        model name, max steps, workspace root
-    runs.py          what a run did: the record every view reads
-    history.py       writing that record to disk, and reading it back
-    tui.py           the live curses dashboard
-    report.py        the plain-text log and the end-of-run summary
+    __init__.py       __version__, read by pyproject at build time
+    main.py           CLI entry: read task, run loop, print a summary
+    loop.py           the agent loop
+    llm.py            provider boundary: Gemini + OpenAI-compatible
+                      + OllamaModels, the local model manager
+    setup.py          `marth --setup`: check for Ollama, fetch the model
+    tools.py          tool functions + tool schemas
+    safety.py         path sandbox + confirmation prompts
+    prompt.py         the system prompt
+    config.py         model name, max steps, workspace root, settings file
+    runs.py           what a run did: the record every view reads
+    history.py        writing that record to disk, and reading it back
+    tui.py            the live curses dashboard
+    report.py         the plain-text log and the end-of-run summary
   tests/
     conftest.py       shared `project` fixture
     test_tools.py
@@ -75,12 +78,30 @@ marth-ai/
     test_report.py
     test_tui.py
     test_dashboard_e2e.py
+    test_config.py     where the agent looks, installed vs checkout
+    test_packaging.py  the install manifest, and that it agrees with
+                       requirements.txt
+    test_setup.py      `--setup` against a fake Ollama, and in a real pty
   check_duplicates.py  dev check: no silently shadowed definitions
   mutation_check.py    dev check: do the tests notice broken safety code?
 ```
 
-The project directory (`marth-ai/`) is also the default workspace root, so
-the agent's sandbox boundary is the project itself.
+The default workspace root is the project directory in a checkout and the
+current directory when installed. See "Installed, or run from a
+checkout" below for why that is not a detail.
+
+## Packaging
+
+`pyproject.toml` is the source of truth for dependencies;
+`requirements.txt` mirrors it for the plain `pip install -r` path, and
+`tests/test_packaging.py` fails if they drift. `pytest` is a dev extra
+and must not become a runtime dependency.
+
+`version` is read from `agent.__version__` at build time, so
+`agent/__init__.py` must stay cheap to import — no submodule imports, no
+work at import. `packages = ["agent"]` is listed explicitly because
+auto-discovery would install `tests/` and the two dev scripts as
+top-level importable modules.
 
 ## Tools
 
@@ -154,6 +175,58 @@ directory, and they are gitignored. A user who would rather the agent
 wrote nothing outside the task at all can turn them off with
 `--no-history`; that is a choice, not a fallback, so do not make the log
 optional for reasons of convenience.
+
+## Installed, or run from a checkout
+
+`config.is_checkout()` decides which of two worlds we are in, by asking
+whether a `pyproject.toml` sits next to the `agent/` package. An
+installed copy has none, because the file that built it was not shipped.
+
+Three things follow from that one fact, and all three would be silently
+wrong rather than loudly broken:
+
+- the sandbox root, which is the project directory in a checkout and the
+  **current directory** when installed (`config.default_workspace`). A
+  sandbox rooted at `site-packages` would hold the agent's own
+  dependencies and none of the user's code.
+- where settings are read from: the project's `.env` in a checkout,
+  `~/.config/marth-ai/.env` when installed (`config.env_file_for`).
+- nothing else. Do not add a third `if is_checkout` without a reason.
+
+The `.env` is loaded in `config`, at import, **above** the values that
+read it. `PROVIDER` is read a few lines below the load, so loading it in
+`main()` instead is a silent no-op: the file is read too late to matter.
+`load_dotenv` is called without `override=True`, so a real environment
+variable always wins and a one-off override needs no file edit.
+
+## Installing a model
+
+`setup.py` answers "can this machine run a task yet" and fixes it. It
+checks, in order, because each failure has a different fix: the `ollama`
+binary, then a server, then the model.
+
+The HTTP is in `llm.OllamaModels`, not in `setup.py`, like everything
+else that talks to a provider. It is not a third LLM provider — it never
+sees a prompt and implements no part of the `LLM` protocol.
+
+Three things in here were bugs before they were code, so do not undo
+them:
+
+- `has_model` matches **exactly**. `qwen2.5:0.5b` and `qwen2.5:1.5b`
+  share a name and are different models; a loose match skipped a
+  gigabyte of download and 404ed on every run after.
+- the progress reporter is given `sys.stdout.write`, not `print`. A
+  printer appends a newline, which turns 400 updates into 400 lines
+  instead of one rewritten line. Only the pty test catches this.
+- Ollama reports `total`/`completed` per *layer*, never per model. Taken
+  literally the bar reads 100% after the first of nine layers. `_PullTally`
+  accumulates them and caps at 99 until the server says `success`, because
+  layers already on disk are never mentioned and the denominator
+  under-counts.
+
+Setup will not install Ollama itself: a large third-party binary on the
+user's `PATH` is their decision, not an installer's. It prints the link
+and stops.
 
 ## The system prompt
 

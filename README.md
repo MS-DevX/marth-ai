@@ -7,10 +7,74 @@ a command), the agent runs them and feeds the results back, repeating until
 the task is done. No agent frameworks — just the Gemini SDK and the standard
 library.
 
+## Install
+
+```bash
+pipx install git+https://github.com/MS-DevX/marth-ai.git
+marth --setup
+```
+
+Two commands. The first installs the agent; the second checks the machine
+is ready and fixes it if not.
+
+`--setup` looks for [Ollama](https://ollama.com), asks its server what
+models it already holds, and downloads the recommended one
+(`granite4.1:8b`, about 5GB) only if it is missing. It then writes your
+provider and model to `~/.config/marth-ai/.env`, which is what makes a
+bare `marth` work with no flags and no key.
+
+```bash
+marth "explain what this repo does"
+```
+
+Run it from any directory. The agent treats **the directory you are in**
+as its sandbox, so `cd` into a project first. Point it elsewhere with
+`AGENT_WORKSPACE=/path/to/repo`.
+
+Already have Ollama and a model? `--setup` says so and downloads nothing.
+Prefer the cloud? Skip `--setup` and set a key instead — see
+[Providers](#providers).
+
+To upgrade:
+
+```bash
+pipx upgrade marth-ai
+```
+
+### What setup does and does not do
+
+| Step | If it is missing |
+| --- | --- |
+| Ollama binary | Prints the download link and stops. It will not install a large third-party program on your `PATH` without asking. |
+| Ollama server | Starts one in the background, then waits for it to answer. |
+| The model | Downloads it, showing one progress line. |
+| Your settings | Written to `~/.config/marth-ai/.env` only once all of the above worked. |
+
+It never writes a settings file for a model it did not install, so a
+failed setup cannot leave you pointed at something that is not there.
+
+Check what you have without changing anything:
+
+```bash
+marth --setup          # idempotent: a second run downloads nothing
+```
+
+## Working on the agent
+
+To change the agent itself, clone it instead:
+
+```bash
+git clone https://github.com/MS-DevX/marth-ai.git
+cd marth-ai
+python3 -m venv .venv && source .venv/bin/activate
+pip install -e ".[dev]"
+```
+
 ## Status
 
-Phase 7 is done. All six tools work, the model is told how to use them,
-and every run is watchable live and readable afterwards.
+Phases 1-9 are done. All six tools work, the model is told how to use
+them, every run is watchable live and readable afterwards, and the whole
+thing installs from a link.
 
 ## Using it
 
@@ -18,11 +82,12 @@ The agent is a coding assistant with a short leash. Point it at a
 directory and give it a task in plain English:
 
 ```bash
-cd marth-ai
-python -m agent.main "explain what agent/loop.py does"
-python -m agent.main "add a --verbose flag to main.py, then run the tests"
-python -m agent.main                     # prompts for the task
+marth "explain what agent/loop.py does"
+marth "add a --verbose flag to main.py, then run the tests"
+marth                                       # prompts for the task
 ```
+
+From a checkout, the same thing is `python -m agent.main "..."`.
 
 It reads, edits and runs commands on its own, asking before each change.
 Because it asks, **run it in a terminal** — with no terminal there is
@@ -188,27 +253,29 @@ do not exist. `granite4.1:8b` was noticeably more accurate than
 `lfm2.5:8b` on the same tasks. A cloud model makes these far rarer, at
 the cost of a daily quota.
 
-## Setup
+## Using the cloud instead
 
-Python 3.11 or newer.
+`marth --setup` sets up a local model, because that needs no key and no
+quota. To use Gemini instead, get a key from
+<https://aistudio.google.com/apikey> and put it in the settings file:
 
 ```bash
-cd marth-ai
-python3 -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
-
-cp .env.example .env      # then edit .env and paste your key
-```
-
-Get a key from <https://aistudio.google.com/apikey> and put it in `.env`:
-
-```
+mkdir -p ~/.config/marth-ai
+cat > ~/.config/marth-ai/.env <<'EOF'
+AGENT_PROVIDER=gemini
 GEMINI_API_KEY=your_actual_key
+EOF
 ```
 
-`.env` is gitignored. The key is only ever read from the environment and
-handed to the SDK — it is never printed.
+A real environment variable always beats the file, so a one-off override
+needs no editing at all:
+
+```bash
+AGENT_MODEL=gemini-3.1-flash-lite marth "what does this do"
+```
+
+The key is only ever read from the environment and handed to the SDK — it
+is never printed, and never written to a run log.
 
 ## Usage
 
@@ -220,32 +287,38 @@ python -m agent.main "explain what this repo does"
 python -m agent.main
 
 # Use a different model
-python -m agent.main --model gemini-3.1-flash-lite "hello"
+marth --model gemini-3.1-flash-lite "hello"
 
 # See which models your key can use
-python -m agent.main --list-models
+marth --list-models
+
+# Check the machine is ready, downloading a local model if not
+marth --setup
+
+# Install a different local model than the recommended one
+marth --setup --model qwen2.5:7b
 
 # Approve every write/edit/command without being asked (see below)
-python -m agent.main --yes "add a tests/test_thing.py and run pytest"
+marth --yes "add a tests/test_thing.py and run pytest"
 
 # Watch it work on the live dashboard (the default in a real terminal)
-python -m agent.main "add type hints to stats.py"
+marth "add type hints to stats.py"
 
 # Print a plain log instead - needed when piping, and honest for scripts
-python -m agent.main --plain "add type hints to stats.py"
+marth --plain "add type hints to stats.py"
 
 # Review what previous runs did
-python -m agent.main --history
-python -m agent.main --run 20260930-141203-a7f1
+marth --history
+marth --run 20260930-141203-a7f1
 
 # Do not write a run log at all
-python -m agent.main --no-history "explain what this repo does"
+marth --no-history "explain what this repo does"
 
 # Run entirely on a local model via Ollama (no API key, no rate limit)
-AGENT_PROVIDER=openai python -m agent.main "explain what this repo does"
+AGENT_PROVIDER=openai marth "explain what this repo does"
 ```
 
-Run these from the `marth-ai` directory (or set `PYTHONPATH` to it). Every
+From a checkout, use `python -m agent.main` in place of `marth`. Every
 run prints the workspace, provider, and model it is using, so the sandbox
 scope and the target are always visible.
 
@@ -261,28 +334,28 @@ provider is a config value. Two implementations ship:
 
 ### Running fully local with Ollama
 
-Installed under `~/.local/opt/ollama` (no root needed). Start the server
-once per session:
+`marth --setup` does all of this for you. By hand:
 
 ```bash
-~/.local/opt/ollama/bin/ollama serve &
+~/.local/opt/ollama/bin/ollama serve &        # if it is not already running
+
+marth --setup --model granite4.8b             # downloads it if missing
+
+marth "list the files in agent/"
 ```
 
-Then pull a model and point the agent at it:
+`granite4.1:8b` is what setup installs, because it was verified to drive
+the write tools through a real edit-and-command task. `lfm2.5:8b` is the
+other local default and is built specifically for tool calling. Only one
+model is held in memory at a time.
 
-```bash
-~/.local/opt/ollama/bin/ollama pull lfm2.5:8b        # primary
-~/.local/opt/ollama/bin/ollama pull granite4.1:8b    # alternative
+Setup will not install Ollama itself. It is a large third-party program on
+your `PATH`, and that is a decision for you to make, not for an installer
+to make quietly.
 
-AGENT_PROVIDER=openai python -m agent.main "list the files in agent/"
-```
-
-`lfm2.5:8b` is the default local model because it is built for tool
-calling, which is all an agent does. `granite4.1:8b` is an Apache-2.0
-alternative. Only one model is held in memory at a time.
-
-Ollama's OpenAI-compatible endpoint is used, so the same code path serves
-Groq or OpenRouter — just change `OPENAI_BASE_URL` and `OPENAI_API_KEY`.
+Ollama's OpenAI-compatible endpoint is used for inference, so the same
+code path serves Groq or OpenRouter — just change `OPENAI_BASE_URL` and
+`OPENAI_API_KEY`.
 
 > On a CPU-only machine the model needs roughly its own file size free in
 > RAM. If loading fails or the machine crawls, close a browser and retry.
@@ -302,7 +375,8 @@ environment variables (see `.env.example`):
 | `AGENT_COMMAND_TIMEOUT` | `30` | Seconds before a shell command is killed |
 | `AGENT_MAX_OUTPUT_CHARS` | `4000` | Tool output truncation limit |
 | `AGENT_MAX_FILE_BYTES` | `512000` | `read_file` refuses anything larger |
-| `AGENT_WORKSPACE` | the project dir | The only directory the agent may touch |
+| `AGENT_WORKSPACE` | the current directory | The only directory the agent may touch |
+| `AGENT_CONFIG_DIR` | `~/.config/marth-ai` | Where the settings file is read from and written to |
 | `OPENAI_BASE_URL` | `http://localhost:11434/v1` | OpenAI-compatible endpoint |
 | `OPENAI_API_KEY` | `ollama` | Ignored locally; required by cloud providers |
 | `AGENT_CONTEXT_TOKENS` | `8192` | Context window requested |
@@ -313,10 +387,24 @@ environment variables (see `.env.example`):
 | `AGENT_YES` | `0` | `1` is the same as `--yes`; skips confirmations |
 | `AGENT_NO_HISTORY` | `0` | `1` is the same as `--no-history`; writes no run log |
 | `AGENT_MAX_HISTORY_RUNS` | `200` | Oldest run logs deleted past this many |
+| `AGENT_PULL_TIMEOUT` | `120` | Seconds a model download may stall |
+| `AGENT_SETUP_ATTEMPTS` | `20` | Polls while waiting for a started server |
+| `AGENT_SETUP_POLL` | `0.5` | Seconds between those polls |
 
 The workspace root is the sandbox boundary. The agent may only read and
-write files that resolve inside it. By default that is the `marth-ai/`
-project directory, so the agent cannot wander into your home directory.
+write files that resolve inside it.
+
+What that defaults to depends on how you installed it, which is the one
+place the two installations genuinely differ:
+
+| Installed | Default workspace | Why |
+| --- | --- | --- |
+| `pipx install` | the directory you are in | "Run this on my code" means the code in front of you |
+| from a checkout | the `marth-ai/` project directory | the project *is* the code being worked on |
+
+So an installed agent will not wander into your home directory, but it
+will act on whatever directory you `cd` into — including a repository you
+did not mean to point it at. `cd` deliberately.
 
 Being inside the workspace is not enough on its own. Secret files live in
 there too, and the agent has no reason to see any of them:
@@ -408,16 +496,18 @@ than left running.
 marth-ai/
   AGENTS.md          rules for future sessions
   README.md          this file
-  requirements.txt
+  pyproject.toml     packaging: the `marth` command and the deps
+  requirements.txt   the same deps for a plain `pip install -r`
   .env.example
   agent/
     main.py          CLI entry: read task, run loop, print a summary
     loop.py          the agent loop + the tool-output truncation choke point
     llm.py           provider boundary: Gemini + OpenAI-compatible
+    setup.py         `marth --setup`: check for Ollama, fetch the model
     tools.py         tool functions + tool schemas
     safety.py        path sandbox, secret blocking, truncation, confirmations
     prompt.py        the system prompt, and why each line is there
-    config.py        model name, max steps, workspace root
+    config.py        model name, max steps, workspace root, settings file
     runs.py          what a run did: the record every view reads
     history.py       writing that record to disk, and reading it back
     tui.py           the live curses dashboard
@@ -438,6 +528,9 @@ marth-ai/
     test_report.py
     test_tui.py
     test_dashboard_e2e.py
+    test_config.py    where the agent looks for things, installed vs checkout
+    test_packaging.py the install manifest
+    test_setup.py    `marth --setup`, against a fake Ollama
   check_duplicates.py   dev check: no silently shadowed definitions
   mutation_check.py     dev check: do the tests notice broken safety code?
 ```

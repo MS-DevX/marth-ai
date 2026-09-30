@@ -11,17 +11,21 @@ import argparse
 import sys
 from collections.abc import Callable
 
-from dotenv import load_dotenv
-
-from . import config, history, llm, loop, report, tui
+from . import config, history, llm, loop, report, setup, tui
 from .llm import LLM, build_llm
 from .runs import Run
 
 
-def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
-    """Parse command line arguments."""
+def build_parser() -> argparse.ArgumentParser:
+    """Return the argument parser, built but not run.
+
+    Separate from `parse_args` so the set of flags can be asked for
+    without parsing anything, which is what keeps the README honest: a
+    test can check that every flag the README documents is one this
+    parser accepts, and would fail on a renamed one.
+    """
     parser = argparse.ArgumentParser(
-        prog="agent",
+        prog="marth",
         description="A small terminal coding agent.",
     )
     parser.add_argument(
@@ -60,6 +64,15 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Show one past run in full. The ID is the first column of --history.",
     )
     parser.add_argument(
+        "--setup",
+        action="store_true",
+        help=(
+            "Install what a run needs: check for Ollama and the local "
+            "model, download the model if it is missing, and save the "
+            "choice. Then exit."
+        ),
+    )
+    parser.add_argument(
         "--plain",
         action="store_true",
         help="Skip the live dashboard and print one line per tool call.",
@@ -69,7 +82,16 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         action="store_true",
         help="Do not record this run. Nothing is written to .marth-ai/.",
     )
-    return parser.parse_args(argv)
+    return parser
+
+
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    """Parse command line arguments.
+
+    Args:
+        argv: The arguments to parse, or None for the real ones.
+    """
+    return build_parser().parse_args(argv)
 
 
 def read_task(argument: str | None) -> str:
@@ -219,6 +241,31 @@ def run_and_report(
     return run.answer
 
 
+# --- setup -----------------------------------------------------------------
+
+
+def show_setup(model: str | None) -> int:
+    """Install what a run needs. Returns a process exit code.
+
+    Args:
+        model: The model to install, or None for the recommended one.
+    """
+    print("Setting up marth-ai.\n")
+    result = setup.run_setup(model)
+    if not result.ok:
+        print("\nSetup did not finish:")
+        for problem in result.problems:
+            print(f"  - {problem}")
+        return 1
+    print(
+        f"\nReady. Run a task in any directory:\n"
+        f"  marth \"explain what this repo does\"\n\n"
+        f"The agent will only touch the directory you are in. Point it "
+        f"somewhere else with AGENT_WORKSPACE=/path/to/repo."
+    )
+    return 0
+
+
 # --- history commands ------------------------------------------------------
 
 
@@ -262,11 +309,10 @@ def show_run(run_id: str) -> int:
 
 def main(argv: list[str] | None = None) -> int:
     """Entry point. Returns a process exit code."""
-    # An explicit path. `load_dotenv()` with no argument walks up from the
-    # *calling file*, which is fragile when the code is run from somewhere
-    # unusual, so we point it at the project root instead.
-    load_dotenv(config.PROJECT_ROOT / ".env")
-
+    # The settings file is loaded by config, at import, because the values
+    # it holds have to be in the environment before config reads them. A
+    # second load here would be too late to matter and would only look
+    # like it was doing something.
     args = parse_args(argv)
 
     if args.history:
@@ -277,6 +323,8 @@ def main(argv: list[str] | None = None) -> int:
         for name in list_models(build_llm(args.model)):
             print(name)
         return 0
+    if args.setup:
+        return show_setup(args.model)
 
     if args.yes:
         config.AUTO_APPROVE = True
