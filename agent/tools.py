@@ -9,11 +9,20 @@ The model never sees the Python signature or the docstring. It only sees
 the schema, so the `description` fields below are effectively the prompt
 for each tool. Write them for the model, not for yourself.
 
-Tools return a plain string. That string is fed straight back to the
-model, so it should read like a short report, not like a Python repr.
-Returning a string (rather than raising) is deliberate: a tool that fails
+Tools return a `Result`, which is a string carrying one extra piece of
+information: how the call went. The string half is fed straight back to
+the model, so it should read like a short report, not like a Python repr.
+Returning a value (rather than raising) is deliberate: a tool that fails
 should tell the model what went wrong so it can try something else, not
 crash the run.
+
+The status half exists because the alternative was reading it back out of
+that prose afterwards. That was tried, and it fails in both directions: a
+refused write whose message is reworded gets recorded as a success, and a
+file the model reads that happens to contain the words "declined by the
+user" gets recorded as a refusal. Both were real. The status is known here,
+at the moment the call happens, so it is reported here rather than guessed
+at later.
 """
 
 import difflib
@@ -21,9 +30,52 @@ import subprocess
 from pathlib import Path
 
 from . import config, safety
+from .runs import CallStatus
 
 # Directories that listing and searching skip, to keep results readable.
 IGNORED_DIRS = {".git", ".venv", "node_modules"}
+
+
+class Result(str):
+    """A tool's output, plus how the call went.
+
+    Subclasses `str` so every caller that wants the text - including the
+    model - is unaffected by carrying the status along.
+
+    Args:
+        text: What to show the model.
+        status: How the call ended. `"ok"` means the tool did what it was
+            asked; anything else means it did not, and the difference
+            matters afterwards: the dashboard colours the two differently
+            and the history file has to record a refusal as a refusal.
+        approved: Whether a person said yes, or None if nobody was asked.
+            Read-only tools never ask, and keeping that distinct from a
+            decline is the point of the field.
+    """
+
+    __slots__ = ("status", "approved")
+
+    def __new__(
+        cls,
+        text: str,
+        status: CallStatus = "ok",
+        approved: bool | None = None,
+    ) -> "Result":
+        """Build the result, keeping the text as the string value."""
+        made = super().__new__(cls, text)
+        made.status = status
+        made.approved = approved
+        return made
+
+
+def declined(text: str) -> Result:
+    """Return a result recording that a person said no."""
+    return Result(text, "declined", approved=False)
+
+
+def failed(text: str) -> Result:
+    """Return a result recording that the tool could not do its job."""
+    return Result(text, "error")
 
 
 def format_size(num_bytes: int) -> str:
@@ -48,7 +100,7 @@ def list_files(path: str = ".") -> str:
     """
     target = safety.resolve_path(path)
     if not target.is_dir():
-        return f"Not a directory: {path}"
+        return failed(f"Not a directory: {path}")
 
     entries: list[str] = []
     for entry in sorted(target.iterdir()):
@@ -74,19 +126,22 @@ def write_file(path: str, content: str) -> str:
     """
     target = safety.resolve_path(path)
     if target.is_dir():
-        return f"Not a file: {path}"
+        return failed(f"Not a file: {path}")
     if not safety.confirm_write(target, content):
-        return f"Declined by the user. Nothing was written to {path}."
+        return declined(f"Declined by the user. Nothing was written to {path}.")
 
     existed = target.exists()
     try:
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(content, encoding="utf-8")
     except OSError as exc:
-        return f"Could not write {path}: {exc}"
+        return failed(f"Could not write {path}: {exc}")
 
     verb = "Overwrote" if existed else "Created"
-    return f"{verb} {path} ({format_size(len(content))}, {content.count(chr(10)) + 1} lines)."
+    return Result(
+        f"{verb} {path} ({format_size(len(content))}, {content.count(chr(10)) + 1} lines).",
+        approved=True,
+    )
 
 
 def edit_file(path: str, old: str, new: str) -> str:
@@ -107,37 +162,40 @@ def edit_file(path: str, old: str, new: str) -> str:
     """
     target = safety.resolve_path(path)
     if not target.is_file():
-        return f"Not a file: {path}"
+        return failed(f"Not a file: {path}")
     try:
         body = target.read_text(encoding="utf-8")
     except (OSError, UnicodeDecodeError) as exc:
-        return f"Could not read {path}: {exc}"
+        return failed(f"Could not read {path}: {exc}")
 
     # Counted before asking, so the user is never prompted for an edit
     # that was never going to happen.
     matches = body.count(old)
     if matches == 0:
         where = _find_near_miss(body, old)
-        return (
+        return failed(
             f"No match for that text in {path}. Read the file first so the "
             f"replacement matches exactly, including whitespace."
             + (f" {where}" if where else "")
         )
     if matches > 1:
-        return (
+        return failed(
             f"That text appears {matches} times in {path}, so replacing it "
             f"would change {matches} places. Include more surrounding "
             f"context to make it unique."
         )
 
     if not safety.confirm_edit(target, old, new):
-        return f"Declined by the user. {path} is unchanged."
+        return declined(f"Declined by the user. {path} is unchanged.")
 
     try:
         target.write_text(body.replace(old, new, 1), encoding="utf-8")
     except OSError as exc:
-        return f"Could not write {path}: {exc}"
-    return f"Edited {path} (1 replacement, {len(old)} -> {len(new)} chars)."
+        return failed(f"Could not write {path}: {exc}")
+    return Result(
+        f"Edited {path} (1 replacement, {len(old)} -> {len(new)} chars).",
+        approved=True,
+    )
 
 
 def _find_near_miss(body: str, old: str) -> str:
@@ -185,7 +243,7 @@ def grep(pattern: str, path: str = ".", ignore_case: bool = False) -> str:
     """
     target = safety.resolve_path(path)
     if not target.exists():
-        return f"No such file or directory: {path}"
+        return failed(f"No such file or directory: {path}")
 
     needle = pattern.lower() if ignore_case else pattern
     files = [target] if target.is_file() else sorted(_walk_files(target))
@@ -249,14 +307,15 @@ def run_command(command: str) -> str:
     """
     blocked, reason = safety.is_command_blocked(command)
     if blocked:
-        return (
+        return Result(
             f"Refused: this command is blocked because {reason}. Blocked "
             f"commands are not run even when approved, so rewriting it "
-            f"will not help."
+            f"will not help.",
+            "blocked",
         )
 
     if not safety.confirm_command(command):
-        return "Declined by the user. Nothing was run."
+        return declined("Declined by the user. Nothing was run.")
 
     timed_out = False
     try:
@@ -288,7 +347,15 @@ def run_command(command: str) -> str:
         parts.append(f"--- stderr ---\n{err.rstrip()}")
     if not out.strip() and not err.strip() and not timed_out:
         parts.append("(no output)")
-    return "\n".join(parts)
+    report = "\n".join(parts)
+    if timed_out:
+        # A timeout is the one case where the command did not run to
+        # completion, so it is the one case that is a tool failure. A
+        # non-zero exit is not: the command ran, and the exit code is
+        # exactly what the model asked for. `pytest` failing is an
+        # answer, not a broken tool.
+        return Result(report, "error", approved=True)
+    return Result(report, approved=True)
 
 
 def read_file(path: str, start_line: int = 0, end_line: int = 0) -> str:
@@ -310,9 +377,9 @@ def read_file(path: str, start_line: int = 0, end_line: int = 0) -> str:
     """
     target = safety.resolve_path(path)
     if not target.is_file():
-        return f"Not a file: {path}"
+        return failed(f"Not a file: {path}")
     if target.stat().st_size > config.MAX_FILE_BYTES:
-        return (
+        return failed(
             f"File is too large ({format_size(target.stat().st_size)}). "
             f"Limit is {format_size(config.MAX_FILE_BYTES)}."
         )

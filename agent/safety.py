@@ -15,6 +15,7 @@ fail to ask, never to act.
 
 import difflib
 import sys
+from collections.abc import Callable
 from pathlib import Path
 
 from . import config
@@ -225,6 +226,31 @@ def is_command_blocked(command: str) -> tuple[bool, str]:
 
 # --- Confirmations --------------------------------------------------------
 
+# An optional replacement for the y/n prompt.
+#
+# It exists because asking is the one thing here that needs a terminal,
+# and there are two situations where this module must not be the thing
+# holding it. A test needs to answer without a person, and a full-screen
+# curses UI owns the terminal, where `input()` produces unreadable
+# output; the dashboard installs a handler that hands the screen back,
+# asks on a normal terminal, and takes the screen back afterwards.
+#
+# None means the built-in prompt, which is what every run that does not
+# install a handler gets. A callable takes the question and returns the
+# answer, and is responsible for its own display.
+_ASK_HANDLER: "Callable[[str], bool] | None" = None
+
+
+def set_ask_handler(handler: "Callable[[str], bool] | None") -> None:
+    """Install a replacement for the y/n prompt, or restore the default.
+
+    Args:
+        handler: Called with the question and returning the answer, or
+            None to go back to the built-in prompt.
+    """
+    global _ASK_HANDLER
+    _ASK_HANDLER = handler
+
 
 def _ask(prompt: str) -> bool:
     """Ask a yes/no question on the terminal.
@@ -238,10 +264,16 @@ def _ask(prompt: str) -> bool:
     If there is no terminal to ask on, the answer is no. Defaulting to
     "yes" here would mean an unattended run silently did whatever the
     model asked, which is the opposite of what a confirmation is for.
+
+    An installed handler replaces the terminal entirely, including the
+    no-terminal check: a handler that draws its own UI is responsible
+    for refusing when it cannot ask.
     """
     if config.AUTO_APPROVE:
         _warn_auto_approve()
         return True
+    if _ASK_HANDLER is not None:
+        return bool(_ASK_HANDLER(prompt))
     if not sys.stdin.isatty():
         print(f"\n{prompt}\n[no terminal available - refusing]", file=sys.stderr)
         return False

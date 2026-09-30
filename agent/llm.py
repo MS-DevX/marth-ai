@@ -99,6 +99,11 @@ class LLMResponse:
 class LLM(Protocol):
     """The minimum interface the agent loop needs from a model."""
 
+    @property
+    def model_name(self) -> str:
+        """Return the model this instance will send to."""
+        ...
+
     def send(self, history: list[Message]) -> LLMResponse:
         """Send the conversation so far and return the model's reply."""
         ...
@@ -118,6 +123,11 @@ class GeminiLLM:
         """Store the model name; the HTTP client is created on first use."""
         self._model = model or config.MODEL_NAME
         self._client: "genai.Client | None" = None
+
+    @property
+    def model_name(self) -> str:
+        """Return the model this instance sends to."""
+        return self._model
 
     @property
     def client(self) -> "genai.Client":
@@ -429,6 +439,11 @@ class OpenAICompatLLM:
         self._model = model or config.MODEL_NAME
         self._base_url = (base_url or config.OPENAI_BASE_URL).rstrip("/")
         self._api_key = api_key or config.OPENAI_API_KEY
+
+    @property
+    def model_name(self) -> str:
+        """Return the model this instance sends to."""
+        return self._model
 
     def _build_messages(self, history: list[Message]) -> list[dict]:
         """Translate our conversation into OpenAI chat messages.

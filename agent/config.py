@@ -109,6 +109,15 @@ WORKSPACE_ROOT = Path(
     os.environ.get("AGENT_WORKSPACE") or PROJECT_ROOT
 ).expanduser().resolve()
 
+# --- Run history ----------------------------------------------------------
+# Where past runs are written, relative to the workspace root. Inside the
+# workspace on purpose: it sits next to the code it describes, one
+# directory holds everything, and deleting it loses nothing but history.
+#
+# Not subject to the path sandbox, since the sandbox is for the agent's
+# file tools and this is the agent writing about itself.
+HISTORY_DIRNAME = ".marth-ai"
+
 # The placeholder value shipped in .env.example. If we see it, the user
 # copied the example file but never filled in a real key.
 _PLACEHOLDER_KEY = "your_key_here"

@@ -1,6 +1,8 @@
 """Command line entry point.
 
-Phase 1 behaviour: read a task, send it to Gemini once, print the reply.
+Starts the agent on a task and prints what it did. Each tool call is
+logged as it happens, followed by a summary of the whole run, because
+"the agent finished" and "the agent gave up" look identical otherwise.
 """
 
 import argparse
@@ -8,8 +10,9 @@ import sys
 
 from dotenv import load_dotenv
 
-from . import config, llm, loop
+from . import config, llm, loop, report
 from .llm import LLM, build_llm
+from .runs import Run
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -96,29 +99,6 @@ def explain_failure(exc: Exception) -> str:
     return f"Error talking to the model: {type(exc).__name__}: {text}"
 
 
-def ask_model(llm: LLM, task: str, auto_approve: bool = False) -> str:
-    """Run the agent on a task and return its reply.
-
-    Args:
-        llm: The model to use.
-        task: What the user asked for.
-        auto_approve: Set from `--yes`. Stored on the config object so
-            the tools can reach it without every signature carrying it.
-
-    Errors are turned into a short message so the user sees a clean failure
-    instead of a stack trace. The API key is never part of what we print.
-    """
-    if auto_approve:
-        config.AUTO_APPROVE = True
-    try:
-        return loop.run(task, llm)
-    except RuntimeError as exc:
-        # Our own config errors (e.g. missing API key) already read well.
-        return f"Configuration error: {exc}"
-    except Exception as exc:  # noqa: BLE001 - CLI boundary, report and stop.
-        return explain_failure(exc)
-
-
 def list_models(llm: LLM) -> list[str]:
     """Return the model names this API key can see.
 
@@ -126,6 +106,46 @@ def list_models(llm: LLM) -> list[str]:
     example retired ones), so this is a starting point, not a guarantee.
     """
     return llm.list_model_names()
+
+
+# --- running a task --------------------------------------------------------
+
+
+def run_task(task: str, model: LLM) -> Run:
+    """Run the agent on a task and return the full record.
+
+    Args:
+        task: What the user asked for.
+        model: The model to use.
+
+    Fills in the record it is given rather than returning a new one, so
+    the object being drawn and the object being summarised are the same.
+    """
+    run = Run(task=task, model=model.model_name, provider=config.PROVIDER)
+    return loop.run_record(task, model, report.LiveLog(), run)
+
+
+def run_and_report(task: str, model: LLM) -> str:
+    """Run a task, print the outcome, and return the final text.
+
+    Args:
+        task: What the user asked for.
+        model: The model to use.
+
+    Errors are turned into a short message so the user sees a clean
+    failure instead of a stack trace. The API key is never part of what
+    we print.
+    """
+    try:
+        run = run_task(task, model)
+    except RuntimeError as exc:
+        # Our own config errors (e.g. missing API key) already read well.
+        return f"Configuration error: {exc}"
+    except Exception as exc:  # noqa: BLE001 - CLI boundary, report and stop.
+        return explain_failure(exc)
+
+    report.summary(run)
+    return run.answer
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -138,10 +158,12 @@ def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
 
     if args.list_models:
-        llm = build_llm(args.model)
-        for name in list_models(llm):
+        for name in list_models(build_llm(args.model)):
             print(name)
         return 0
+
+    if args.yes:
+        config.AUTO_APPROVE = True
 
     task = read_task(args.task)
     if not task:
@@ -154,8 +176,8 @@ def main(argv: list[str] | None = None) -> int:
     print(f"Provider:  {config.PROVIDER}")
     print(f"Model:     {args.model or config.MODEL_NAME}\n")
 
-    llm = build_llm(args.model)
-    print(ask_model(llm, task, auto_approve=args.yes))
+    model = build_llm(args.model)
+    print(run_and_report(task, model))
     return 0
 
 

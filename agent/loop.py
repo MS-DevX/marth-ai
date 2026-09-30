@@ -12,10 +12,13 @@ to the user rather than being swallowed, because "the agent gave up" and
 """
 
 import json
+import time
+from collections.abc import Callable
 from dataclasses import replace
 
 from . import config, prompt, safety, tools
 from .llm import LLM, Message, ToolResult
+from .runs import Run, ToolCall
 
 # Shown in place of a tool result that has been dropped to fit the context
 # window. It has to say something useful: the model may still want to know
@@ -23,11 +26,16 @@ from .llm import LLM, Message, ToolResult
 DROPPED_RESULT = "[earlier result dropped to fit the context window]"
 
 
-def run_tool_call(name: str, args: dict) -> str:
-    """Run one tool by name and return its result as a string.
+def run_tool_call(name: str, args: dict) -> tools.Result:
+    """Run one tool by name and return what it produced.
 
-    A tool that fails returns an error string rather than raising, so the
-    model gets to read what went wrong and try something else.
+    A tool that fails returns an error message rather than raising, so
+    the model gets to read what went wrong and try something else.
+
+    This is the single funnel for every failure a run can have: a missing
+    tool, bad arguments, the sandbox, a crash inside a tool. Each becomes
+    a `Result` tagged `"error"` here, so none of them can reach the
+    dashboard or the history file looking like a success.
 
     The result is truncated here, at the single point where tool output
     enters the conversation, rather than inside each tool. That way the
@@ -39,27 +47,32 @@ def run_tool_call(name: str, args: dict) -> str:
         args: The arguments the model supplied.
 
     Returns:
-        The tool's output, capped in length, or a message describing why
-        it could not run.
+        The tool's output, capped in length, tagged with how it went.
     """
     tool = tools.TOOL_REGISTRY.get(name)
     if tool is None:
         available = ", ".join(sorted(tools.TOOL_REGISTRY))
-        return f"Unknown tool: {name}. Available tools: {available}"
+        return tools.Result(f"Unknown tool: {name}. Available tools: {available}", "error")
 
     # Guard against a tool that does not take the arguments the model sent.
     try:
-        return safety.truncate(str(tool(**args)))
+        outcome = tool(**args)
     except TypeError as exc:
-        return f"Bad arguments for {name}: {exc}"
+        return tools.Result(f"Bad arguments for {name}: {exc}", "error")
     except (safety.SandboxError, safety.SecretFileError) as exc:
-        # These two carry messages written for the model, so they are
-        # passed through. The generic handler below would prefix them
-        # with a Python exception name, which tells the model nothing
+        # These two carry messages written for the model, so the text is
+        # passed through as-is. The generic handler below would bury it
+        # under a Python exception name, which tells the model nothing
         # it can act on.
-        return str(exc)
+        return tools.Result(str(exc), "error")
     except Exception as exc:  # noqa: BLE001 - report to the model, keep going.
-        return f"{name} failed: {type(exc).__name__}: {exc}"
+        return tools.Result(f"{type(exc).__name__}: {exc}", "error")
+
+    # A tool with no failure mode may return a bare string; that is a
+    # success, and a missing `Result` should not fail the call.
+    if not isinstance(outcome, tools.Result):
+        return tools.Result(safety.truncate(outcome))
+    return tools.Result(safety.truncate(outcome), outcome.status, outcome.approved)
 
 
 def call_signature(name: str, args: dict) -> str:
@@ -129,19 +142,52 @@ def compact_history(
     return compacted
 
 
-def run(task: str, llm: LLM) -> str:
+def run(task: str, llm: LLM, on_event: Callable[[Run], None] | None = None) -> str:
     """Run the agent loop until the model is done asking for tools.
 
     Args:
         task: What the user asked for.
         llm: The model to use.
+        on_event: Called with the in-progress run whenever something
+            happens, so a UI can draw while the loop is still working.
+            The same object is passed each time and keeps changing, so a
+            handler that formats it immediately sees that moment's state.
 
     Returns:
         The model's final answer, or a plain statement of why the run
         stopped early.
     """
-    # The prompt is prepended to the task rather than sent as its own
-    # system role. Gemini takes its system prompt in a config field
+    return run_record(task, llm, on_event).answer
+
+
+def run_record(
+    task: str,
+    llm: LLM,
+    on_event: Callable[[Run], None] | None = None,
+    record: Run | None = None,
+) -> Run:
+    """Run the loop, returning the whole record rather than just the text.
+
+    `run()` is the thin wrapper most callers want; this is the one that
+    produces something a dashboard or the history log can use.
+
+    Args:
+        task: What the user asked for.
+        llm: The model to use.
+        on_event: Called as the run progresses; see `run`.
+        record: An existing record to fill in, or None to make one.
+
+        The `record` argument is there so a caller that has to show the
+        run before it starts - to draw a dashboard, or to name a history
+        file - can hold one object for the whole run instead of a
+        placeholder and a separate filled-in copy. Two records means the
+        thing on screen is not the thing that happened.
+
+    Returns:
+        The same `Run` that was passed in, filled in.
+    """
+    # The prompt is prepended to the task rather than passed as a
+    # separate role. Gemini takes its system prompt in a config field
     # rather than in the conversation, and the OpenAI-compatible shape
     # takes it as a message; plumbing it per provider would mean the two
     # paths could drift apart silently. Prepending works identically on
@@ -149,14 +195,34 @@ def run(task: str, llm: LLM) -> str:
     history: list[Message] = [
         Message(role="user", text=f"{prompt.SYSTEM_PROMPT}\n\nThe task: {task}")
     ]
+    if record is None:
+        record = Run(task=task, model=llm.model_name, provider=config.PROVIDER)
+    else:
+        # Filled in rather than replaced: the caller may already have
+        # set fields the loop has no opinion about, such as the name of
+        # the file the run is being written to.
+        record.task = task
+        record.model = llm.model_name
+        record.provider = config.PROVIDER
     seen: dict[str, int] = {}
 
+    def notify() -> None:
+        """Tell the UI something changed, if anyone is listening."""
+        if on_event is not None:
+            on_event(record)
+
+    notify()
     for step in range(1, config.MAX_STEPS + 1):
         response = llm.send(compact_history(history), tool_schemas=tools.TOOL_SCHEMAS)
+        record.steps_used = step
 
         # Prose with no tool calls is the model saying it is finished.
         if not response.tool_calls:
-            return response.text.strip() or "(the model returned nothing)"
+            record.outcome = "finished"
+            record.answer = response.text.strip() or "(the model returned nothing)"
+            record.finished = time.time()
+            notify()
+            return record
 
         results: list[ToolResult] = []
         for call in response.tool_calls:
@@ -164,22 +230,34 @@ def run(task: str, llm: LLM) -> str:
             seen[signature] = seen.get(signature, 0) + 1
 
             if seen[signature] > config.MAX_REPEATED_CALLS:
-                return (
+                record.outcome = "repeating"
+                record.answer = (
                     f"Stopped: the model asked for `{call.name}` with the same "
                     f"arguments {seen[signature] - 1} times and stopped making "
                     f"progress. Last request: {json.dumps(call.args)}. "
                     f"Rephrasing the task, or adding a tool it is missing, "
                     f"usually gets past this."
                 )
+                record.finished = time.time()
+                notify()
+                return record
 
-            print(f"  [step {step}] {call.name}({json.dumps(call.args)})")
+            entry = ToolCall(step=step, name=call.name, args=dict(call.args))
+            started = time.monotonic()
+            outcome = run_tool_call(call.name, call.args)
+            entry.seconds = round(time.monotonic() - started, 3)
+            entry.output = outcome
+            entry.status = outcome.status
+            entry.approved = outcome.approved
+            record.calls.append(entry)
             results.append(
                 ToolResult(
                     call_id=call.id,
                     name=call.name,
-                    content=run_tool_call(call.name, call.args),
+                    content=entry.output,
                 )
             )
+            notify()
 
         history.append(
             Message(
@@ -191,9 +269,13 @@ def run(task: str, llm: LLM) -> str:
         )
         history.append(Message(role="tool", results=tuple(results)))
 
-    return (
+    record.outcome = "step_limit"
+    record.answer = (
         f"Stopped: reached the {config.MAX_STEPS}-step limit without a final "
         f"answer. The last thing the model said was:\n\n"
         f"{history[-2].text.strip() if history[-2].text else '(nothing)'}\n\n"
         f"Raise AGENT_MAX_STEPS to continue, or narrow the task."
     )
+    record.finished = time.time()
+    notify()
+    return record

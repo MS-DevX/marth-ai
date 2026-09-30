@@ -21,9 +21,15 @@ class ScriptedLLM:
         responses: What to return on each successive call to `send`.
     """
 
-    def __init__(self, responses: list[LLMResponse]) -> None:
+    def __init__(self, responses: list[LLMResponse], model: str = "fake-model") -> None:
         self._responses = list(responses)
+        self._model = model
         self.sent: list[list[Message]] = []
+
+    @property
+    def model_name(self) -> str:
+        """Return the fake model name, so the run record is labelled."""
+        return self._model
 
     def send(self, history, tool_schemas=None):  # type: ignore[no-untyped-def]
         """Record the history we were given, then return the next reply."""
@@ -171,10 +177,11 @@ def test_multiple_tools_in_one_turn_all_run() -> None:
     assert len(tool_turns[0].results) == 2
 
 
-def test_stops_at_the_step_limit_and_says_so() -> None:
+def test_stops_at_the_step_limit_and_says_so(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Running out of steps is not the same as finishing, and must not
     look like it."""
-    monkeypatch = pytest.MonkeyPatch()
     monkeypatch.setattr(config, "MAX_STEPS", 3)
     monkeypatch.setattr(config, "MAX_REPEATED_CALLS", 99)
     llm = ScriptedLLM(
@@ -183,19 +190,18 @@ def test_stops_at_the_step_limit_and_says_so() -> None:
     result = loop.run("read everything", llm)
     assert "3-step limit" in result
     assert len(llm.sent) == 3
-    monkeypatch.undo()
 
 
-def test_step_limit_still_honours_a_wrong_looking_message() -> None:
+def test_step_limit_still_honours_a_wrong_looking_message(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """The message must not claim success."""
-    monkeypatch = pytest.MonkeyPatch()
     monkeypatch.setattr(config, "MAX_STEPS", 2)
     monkeypatch.setattr(config, "MAX_REPEATED_CALLS", 99)
     llm = ScriptedLLM(
         [LLMResponse(tool_calls=(call("read_file", path=f"{n}.py"),)) for n in range(9)]
     )
     assert "reached the 2-step limit" in loop.run("go", llm)
-    monkeypatch.undo()
 
 
 def test_empty_reply_is_reported_not_returned_blank() -> None:
@@ -221,9 +227,8 @@ def test_stops_when_the_model_repeats_the_same_call(
     assert len(llm.sent) == 3
 
 
-def test_repeat_count_resets_per_run() -> None:
+def test_repeat_count_resets_per_run(monkeypatch: pytest.MonkeyPatch) -> None:
     """A fresh task must not inherit the previous run's suspicion."""
-    monkeypatch = pytest.MonkeyPatch()
     monkeypatch.setattr(config, "MAX_REPEATED_CALLS", 2)
     for _ in range(2):
         llm = ScriptedLLM(
@@ -231,7 +236,6 @@ def test_repeat_count_resets_per_run() -> None:
             + [text_reply("fine")]
         )
         assert loop.run("read a.py", llm) == "fine"
-    monkeypatch.undo()
 
 
 def test_argument_order_does_not_evade_repeat_detection(
@@ -367,9 +371,18 @@ def test_compaction_does_not_mutate_the_original() -> None:
     assert loop._history_size(history) == before
 
 
-def test_a_twenty_step_run_stays_within_the_context_budget() -> None:
-    """The regression that motivates compaction, checked end to end."""
-    monkeypatch = pytest.MonkeyPatch()
+def test_a_twenty_step_run_stays_within_the_context_budget(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The regression that motivates compaction, checked end to end.
+
+    Takes the `monkeypatch` fixture rather than building its own. A
+    hand-made `pytest.MonkeyPatch()` is only undone by an explicit
+    `.undo()`, which sits after the assertions here: any failure skips
+    it and the patched `read_file` leaks into every later test file.
+    That is how fifteen tests in test_tools.py failed at once for a
+    reason that had nothing to do with them.
+    """
     monkeypatch.setattr(config, "MAX_STEPS", 20)
     monkeypatch.setattr(config, "MAX_REPEATED_CALLS", 99)
     monkeypatch.setattr(config, "MAX_HISTORY_CHARS", 24000)
@@ -383,7 +396,6 @@ def test_a_twenty_step_run_stays_within_the_context_budget() -> None:
     assert len(llm.sent) == 20
     for sent in llm.sent:
         assert loop._history_size(sent) <= config.MAX_HISTORY_CHARS
-    monkeypatch.undo()
 
 
 # --- tool execution -------------------------------------------------------
