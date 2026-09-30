@@ -130,9 +130,10 @@ can contain any text at all, including this repository's own source.
 
 A tool that returns a message instead of raising must return
 `tools.failed(...)`, or the run records a failure as a success. A search
-that found nothing, and a command that exited non-zero, are *not*
-failures: they are the answers the model asked for. A command killed at
-the timeout is.
+that found nothing is *not* a failure: it is the answer the model asked
+for. A command that exited non-zero **is** one, because a failing
+`pytest` is not a clean run and must not be rendered green. A command
+killed at the timeout is one as well.
 
 ## Confirming while curses owns the screen
 

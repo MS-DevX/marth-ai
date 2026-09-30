@@ -349,11 +349,14 @@ def run_command(command: str) -> str:
         parts.append("(no output)")
     report = "\n".join(parts)
     if timed_out:
-        # A timeout is the one case where the command did not run to
-        # completion, so it is the one case that is a tool failure. A
-        # non-zero exit is not: the command ran, and the exit code is
-        # exactly what the model asked for. `pytest` failing is an
-        # answer, not a broken tool.
+        return Result(report, "error", approved=True)
+    if code != 0:
+        # A non-zero exit is recorded as a failure, because that is what
+        # the user watching the run needs to see: `pytest` failing is not
+        # a clean run, and leaving it green hides it. The text is
+        # unchanged, so the model still reads the exit code and both
+        # streams and can tell the difference between a command that
+        # failed on purpose and one that did not do what it was asked.
         return Result(report, "error", approved=True)
     return Result(report, approved=True)
 

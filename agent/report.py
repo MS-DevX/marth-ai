@@ -82,7 +82,7 @@ def touched(run: Run) -> list[str]:
 
 
 def commands(run: Run) -> list[str]:
-    """Return the shell commands a run successfully ran.
+    """Return the shell commands a run actually ran.
 
     Args:
         run: The run to inspect.
@@ -90,11 +90,16 @@ def commands(run: Run) -> list[str]:
     Kept apart from `touched` because a command is not a file. Listing
     `python main.py` under a heading that says "Changed" would have the
     reader believe a file of that name had been written.
+
+    A command that exited non-zero is included, because it ran. One
+    that was declined or blocked is not, because it did not: those are
+    listed under "Refused, so not done:" instead, and repeating them
+    here would report work that never happened.
     """
     return [
         str(call.args.get("command", ""))
         for call in run.calls
-        if call.status == "ok" and call.name == "run_command"
+        if call.name == "run_command" and call.status in {"ok", "error"}
     ]
 
 
@@ -122,7 +127,8 @@ def summary(run: Run, out: TextIO | None = None) -> str:
         f"  {tally['ok']} ok"
         + (f", {tally['declined']} declined" if tally["declined"] else "")
         + (f", {tally['blocked']} blocked" if tally["blocked"] else "")
-        + (f", {tally['error']} errors" if tally["error"] else ""),
+        + (f", {tally['error']} error" if tally["error"] == 1 else "")
+        + (f", {tally['error']} errors" if tally["error"] > 1 else ""),
     ]
 
     written = touched(run)

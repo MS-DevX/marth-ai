@@ -247,7 +247,9 @@ def test_run_command_returns_stdout_and_exit_code(project: Path) -> None:
 
 
 def test_run_command_reports_a_failure_exit_code(project: Path) -> None:
-    assert "exit code: 1" in tools.run_command("exit 1")
+    out = tools.run_command("exit 1")
+    assert "exit code: 1" in out
+    assert out.status == "error"
 
 
 def test_run_command_captures_stderr(project: Path) -> None:

@@ -622,6 +622,14 @@ there. `tests/test_refusal_contract.py` covers every route a call can
 fail by, because a route nobody checks is a route that silently records
 itself as a success.
 
+One route is deliberately *not* a failure: a `grep` that matched
+nothing returned the answer it was asked for. A command exiting non-zero
+**is** recorded as `error`, though its text is unchanged, because a
+failing `pytest` is not a clean run and painting it green would hide the
+one thing the run was for. The model reads the exit code and both
+streams either way, so it acts on the real information rather than on a
+colour.
+
 ## Rate limits
 
 The Gemini free tier allows **20 requests per day** per model, and each

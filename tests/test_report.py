@@ -84,6 +84,31 @@ def test_a_command_is_not_reported_as_a_changed_file() -> None:
     assert "Changed:" not in text
 
 
+def test_a_command_that_failed_is_still_listed_as_run() -> None:
+    """It ran, and a summary that hid it would hide the only bad news.
+
+    Regression from recording a non-zero exit as `error`: filtering this
+    list on `ok` alone dropped the failing command from the report
+    entirely, which is the opposite of what marking it red was for.
+    """
+    run = make_run(calls=[call("run_command", status="error", command="pytest -q")])
+    text = render(run)
+    assert "Commands run:" in text
+    assert "pytest -q" in text
+    assert "1 error" in text
+    assert "1 errors" not in text
+
+
+def test_a_declined_command_is_not_listed_as_run() -> None:
+    """Nothing ran. The refusal list is the honest record of it."""
+    run = make_run(
+        calls=[call("run_command", status="declined", command="pytest -q")]
+    )
+    text = render(run)
+    assert "Commands run:" not in text
+    assert "not done" in text
+
+
 def test_the_same_file_twice_is_listed_once() -> None:
     """Edited five times is still one file changed."""
     calls = [call("edit_file", path="a.py") for _ in range(5)]

@@ -265,23 +265,29 @@ def test_an_edit_matching_several_places_is_an_error(auto_yes) -> None:
 
 
 def test_a_command_that_times_out_is_an_error(auto_yes, monkeypatch) -> None:
-    """A timeout is the one command result that is a tool failure.
-
-    A non-zero exit is not, and this is the difference: `pytest` failing
-    is the answer the model asked for, whereas a command killed at 30
-    seconds never produced one.
-    """
+    """A command killed at the limit never produced an answer."""
     monkeypatch.setattr(config, "COMMAND_TIMEOUT_SECONDS", 0.05)
     result = loop.run_tool_call("run_command", {"command": "sleep 5"})
     assert result.status == "error"
     assert "TIMED OUT" in result
 
 
-def test_a_command_with_a_non_zero_exit_is_not_an_error(auto_yes) -> None:
-    """Otherwise a failing test run would be indistinguishable from a broken tool."""
+def test_a_command_with_a_non_zero_exit_is_an_error(auto_yes) -> None:
+    """A failing test run is not a clean run, so it must not read as one.
+
+    The text is unchanged, so the model still gets the exit code and
+    both streams; only the status the dashboard and history read is
+    different.
+    """
     result = loop.run_tool_call("run_command", {"command": "exit 1"})
-    assert result.status == "ok"
+    assert result.status == "error"
     assert "exit code: 1" in result
+
+
+def test_a_command_that_succeeds_is_ok(auto_yes) -> None:
+    """The other half of the pair: green still has to mean it worked."""
+    result = loop.run_tool_call("run_command", {"command": "true"})
+    assert result.status == "ok"
 
 
 def test_a_search_that_found_nothing_is_not_an_error(auto_yes) -> None:
