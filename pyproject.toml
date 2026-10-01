@@ -13,7 +13,6 @@ dynamic = ["version"]
 # below, so installing the agent does not drag a test runner onto
 # everyone's machine. tests/test_packaging.py fails if the two drift.
 dependencies = [
-    "google-genai>=2.25.0",
     "python-dotenv>=1.0.0",
 ]
 

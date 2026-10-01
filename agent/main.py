@@ -41,7 +41,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--list-models",
         action="store_true",
-        help="List the model names this API key can use, then exit.",
+        help="List the model names the server has, then exit.",
     )
     parser.add_argument(
         "--yes",
@@ -102,14 +102,14 @@ def read_task(argument: str | None) -> str:
 
 
 def explain_failure(exc: Exception) -> str:
-    """Turn a provider error into something the user can act on.
+    """Turn a server error into something the user can act on.
 
-    The raw SDK messages are long, name internal metrics, and bury the one
-    fact that matters. Each case below is a different mistake by the user
-    or a different limit being hit, so each gets its own next step.
+    The raw messages are long, name internal metrics, and bury the one
+    fact that matters. Each case below is a different thing being wrong
+    with the machine or the model, so each gets its own next step.
 
     Args:
-        exc: Whatever the provider raised.
+        exc: Whatever raised.
 
     Returns:
         A short explanation. Falls back to the original text when the
@@ -118,38 +118,55 @@ def explain_failure(exc: Exception) -> str:
     text = str(exc)
     low = text.lower()
 
+    # A model that is not on the machine. This is by far the most common
+    # failure on a local setup, and Ollama reports it as a plain 404, which
+    # on its own looks like a bug in the agent. So it is checked first and
+    # answered with the command that fixes it, not with a list to read.
+    if "404" in low or ("not found" in low and "model" in low):
+        return (
+            "That model is not on this machine. A local server answers a "
+            "request for a model it does not have with a 404, which is "
+            "indistinguishable from a typo in the name.\n\n"
+            "Fetch it, then run the task again:\n"
+            "  marth --setup\n"
+            "Or see what is already downloaded:\n"
+            "  marth --list-models"
+        )
+    if "connection refused" in low or "could not reach" in low:
+        return (
+            f"Could not reach a model server at {config.OPENAI_BASE_URL}.\n\n"
+            "If Ollama is installed but not running, start it:\n"
+            "  ollama serve\n"
+            "Then fetch a model:\n"
+            "  marth --setup"
+        )
+    if "401" in low or ("invalid" in low and "api key" in low):
+        return (
+            "The server rejected the API key. Ollama ignores it, so this "
+            "only happens if OPENAI_BASE_URL was repointed at a cloud "
+            "endpoint. Check OPENAI_API_KEY in the settings file."
+        )
     if any(marker in low for marker in llm.PERMANENT_QUOTA_MARKERS):
         return (
-            "The free tier's daily quota for this model is used up. The API "
-            "reports it as a rate limit, but the limit resets tomorrow, so "
-            "retrying now will not help.\n\n"
-            "Use the local model instead, which has no quota:\n"
-            "  AGENT_PROVIDER=openai python -m agent.main \"your task\"\n"
-            "or try a different model with --model."
+            "The provider's quota for this model is used up. It reports that "
+            "as a rate limit, but the limit does not reset on the timescale a "
+            "retry would take, so waiting will not help.\n\n"
+            "A local model has no quota. Either repoint OPENAI_BASE_URL in "
+            "the settings file at a local Ollama server, or choose another "
+            "model with --model."
         )
-    if "401" in low or "invalid" in low and "api key" in low:
-        return (
-            "The API key was rejected. Check that GEMINI_API_KEY is set in "
-            "the project's .env file."
-        )
-    if "404" in low or "not found" in low and "model" in low:
-        return (
-            "That model is not available to this key. Run "
-            "`python -m agent.main --list-models` to see what is."
-        )
-    if "could not reach" in low:
-        return text
     if len(text) > 400:
-        # Long provider errors are mostly quota links and metric names.
+        # Long server errors are mostly quota links and metric names.
         return f"{text[:400]}\n\n(run with --list-models to check the model name)"
     return f"Error talking to the model: {type(exc).__name__}: {text}"
 
 
 def list_models(llm: LLM) -> list[str]:
-    """Return the model names this API key can see.
+    """Return the model names the server has.
 
-    Models can be listed by an account but still be rejected on use (for
-    example retired ones), so this is a starting point, not a guarantee.
+    For a local server that is the list of what is downloaded, so this is
+    also the honest answer to "what can I run right now". A model can be
+    listed and still be rejected on use, so it is a starting point.
     """
     return llm.list_model_names()
 
@@ -176,7 +193,7 @@ def run_task(
     on the same loop, so they are composed here rather than inside
     `loop.run_record`: the loop should not know that either exists.
     """
-    run = Run(task=task, model=model.model_name, provider=config.PROVIDER)
+    run = Run(task=task, model=model.model_name)
     log = history.RunLog(run) if record else None
 
     def work(view: Callable[[Run], None] | None) -> Run:
@@ -226,14 +243,11 @@ def run_and_report(
         record: Write the run to the history directory.
 
     Errors are turned into a short message so the user sees a clean
-    failure instead of a stack trace. The API key is never part of what
-    we print.
+    failure instead of a stack trace. Each message is written here and
+    names a fix, rather than being the raw response body.
     """
     try:
         run = run_task(task, model, live=live, record=record)
-    except RuntimeError as exc:
-        # Our own config errors (e.g. missing API key) already read well.
-        return f"Configuration error: {exc}"
     except Exception as exc:  # noqa: BLE001 - CLI boundary, report and stop.
         return explain_failure(exc)
 
@@ -320,7 +334,16 @@ def main(argv: list[str] | None = None) -> int:
     if args.run:
         return show_run(args.run)
     if args.list_models:
-        for name in list_models(build_llm(args.model)):
+        # A missing server is the common case here -- `--list-models` is
+        # often run before `--setup` has ever been run -- and it arrives
+        # as a connection error from inside llm.py. Answered with the
+        # command that fixes it rather than a stack trace.
+        try:
+            names = list_models(build_llm(args.model))
+        except Exception as exc:  # noqa: BLE001 - CLI boundary, report and stop.
+            print(explain_failure(exc), file=sys.stderr)
+            return 1
+        for name in names:
             print(name)
         return 0
     if args.setup:
@@ -339,7 +362,7 @@ def main(argv: list[str] | None = None) -> int:
     # Printed every run so the sandbox boundary and the target model are
     # never a surprise.
     print(f"Workspace: {config.WORKSPACE_ROOT}")
-    print(f"Provider:  {config.PROVIDER}")
+    print(f"Server:    {config.OPENAI_BASE_URL}")
     print(f"Model:     {args.model or config.MODEL_NAME}\n")
 
     model = build_llm(args.model)

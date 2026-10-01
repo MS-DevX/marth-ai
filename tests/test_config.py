@@ -133,12 +133,9 @@ def test_a_settings_file_fills_in_a_value_the_environment_does_not_set(
     monkeypatch, tmp_path: Path
 ) -> None:
     """The other half of the same rule, and the reason setup writes a file
-    at all: a provider set in the file is still honoured."""
+    at all: a model set in the file is still honoured."""
     env = tmp_path / ".env"
-    env.write_text("AGENT_PROVIDER=openai\n")
-    monkeypatch.delenv("AGENT_PROVIDER", raising=False)
+    env.write_text("AGENT_MODEL=some-model\n")
+    monkeypatch.delenv("AGENT_MODEL", raising=False)
     load_dotenv(env)
-    try:
-        assert os.environ["AGENT_PROVIDER"] == "openai"
-    finally:
-        monkeypatch.delenv("AGENT_PROVIDER", raising=False)
+    assert os.environ["AGENT_MODEL"] == "some-model"

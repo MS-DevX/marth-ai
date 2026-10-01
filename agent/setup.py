@@ -254,18 +254,18 @@ def _finish(reporter: object) -> None:
         closer()
 
 
-def write_settings(
-    model: str, config_dir: Path | None = None, provider: str = "openai"
-) -> Path:
+def write_settings(model: str, config_dir: Path | None = None) -> Path:
     """Write the settings file that makes this choice the default.
 
     A real environment variable still wins over the file, so a one-off
     `AGENT_MODEL=... marth ...` is unaffected by anything written here.
 
+    Nothing about the provider is written, because there is only one and
+    a setting that cannot take another value is not a setting.
+
     Args:
         model: The model to record.
         config_dir: Where to write. Defaults to the user's config dir.
-        provider: The provider to record.
     """
     target_dir = config_dir or config.CONFIG_DIR
     target_dir.mkdir(parents=True, exist_ok=True)
@@ -273,7 +273,6 @@ def write_settings(
     body = (
         "# Written by `marth --setup`. Edit freely, or delete this file to go\n"
         "# back to the defaults. A real environment variable overrides it.\n"
-        f"AGENT_PROVIDER={provider}\n"
         f"AGENT_MODEL={model}\n"
     )
     target.write_text(body)
@@ -296,7 +295,7 @@ def run_setup(
         out: Where progress lines go.
         config_dir: Where to write settings. Defaults to the user's.
     """
-    wanted = (model or config.RECOMMENDED_LOCAL_MODEL).strip()
+    wanted = (model or config.DEFAULT_MODEL).strip()
     report = SetupReport(model=wanted)
 
     ollama = find_ollama()
@@ -312,7 +311,7 @@ def run_setup(
         if not started:
             report.problems.append(
                 "Ollama is installed but no server is running. Start it with "
-                "`ollama serve` and re-run `marth setup`."
+                "`ollama serve` and re-run `marth --setup`."
             )
             return report
 

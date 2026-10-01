@@ -50,7 +50,7 @@ def env_file_for(checkout: bool, project_root: Path, config_dir: Path) -> Path:
 
     In a checkout that is the project's own .env, so the documented
     workflow does not change. Installed, there is no project to speak
-    of, so it is the per-user file that `marth setup` writes.
+    of, so it is the per-user file that `marth --setup` writes.
 
     Args:
         checkout: The answer from `is_checkout`.
@@ -83,9 +83,9 @@ _IS_CHECKOUT = is_checkout(PROJECT_ROOT)
 # --- Settings file --------------------------------------------------------
 # Loaded here, before anything below, because every value in this file
 # can be set in it and reading one before the load would quietly ignore
-# the setting. That is not hypothetical: PROVIDER is read a few lines
-# down, so an .env naming AGENT_PROVIDER has to be loaded above it and
-# not in main().
+# the setting. That is not hypothetical: MODEL_NAME is read a few lines
+# down, so an .env naming AGENT_MODEL has to be loaded above it and not
+# in main(), where it would be too late.
 #
 # A real environment variable always beats the file, which is what
 # load_dotenv does by default and is what lets a one-off override work
@@ -95,33 +95,19 @@ if ENV_FILE.is_file():
     load_dotenv(ENV_FILE)
 
 # --- Model ---------------------------------------------------------------
-# The ONLY place a model name appears in the project.
+# The ONLY place a model name appears in the project. Override with
+# AGENT_MODEL.
 #
-# Note: `gemini-2.5-flash` is listed by the models API but is rejected for
-# newer accounts, so it is not a safe default. The Gemini default below was
-# verified to serve a real request.
+# granite4.1 over lfm2.5 because it was verified to drive the write tools
+# through a real edit-and-command task on this project. A model that
+# cannot edit anything is a worse failure than a slower one.
 #
-# Which provider to talk to: "gemini" or "openai" (Ollama, Groq, ...).
-# Gemini stays the default so nothing changes until you opt in.
-PROVIDER = os.environ.get("AGENT_PROVIDER", "gemini").strip().lower()
-
-# Per-provider defaults, so a single AGENT_MODEL override works for both.
-DEFAULT_MODELS = {
-    "gemini": "gemini-3.5-flash",
-    "openai": "lfm2.5:8b",
-}
-DEFAULT_MODEL = DEFAULT_MODELS.get(PROVIDER, DEFAULT_MODELS["gemini"])
+# This is also what `marth --setup` downloads, deliberately: one name, used
+# both as the default to run and as the thing to put on the machine. When
+# these were separate, setup could install a model the agent would not
+# use.
+DEFAULT_MODEL = "granite4.1:8b"
 MODEL_NAME = os.environ.get("AGENT_MODEL", "").strip() or DEFAULT_MODEL
-
-# The model `marth setup` installs. Separate from DEFAULT_MODEL above
-# because the two answer different questions: that is what this run uses,
-# this is what gets put on the machine so there is something to use.
-#
-# granite4.1 over lfm2.5 because it was the one verified to drive the
-# write tools through a real edit-and-command task on this project. An
-# installer that quietly handed over a model which cannot edit anything
-# would be a worse failure than no installer.
-RECOMMENDED_LOCAL_MODEL = "granite4.1:8b"
 
 # How long one chunk of a model download may stall before giving up. The
 # per-request timeout above is for a single API exchange; a multi-
@@ -135,13 +121,17 @@ PULL_TIMEOUT_SECONDS = float(os.environ.get("AGENT_PULL_TIMEOUT", "120"))
 SETUP_STARTUP_ATTEMPTS = int(os.environ.get("AGENT_SETUP_ATTEMPTS", "20"))
 SETUP_STARTUP_POLL_SECONDS = float(os.environ.get("AGENT_SETUP_POLL", "0.5"))
 
-# --- OpenAI-compatible providers -----------------------------------------
-# Ollama, Groq, and OpenRouter all expose the same OpenAI-shaped HTTP API,
-# so one class in llm.py covers all three.
+# --- The model server ------------------------------------------------------
+# Ollama speaks the OpenAI-shaped HTTP API, so the URL has that shape
+# whether the thing answering is Ollama or something else. The default is
+# a local server, which is the intended target: no key, no quota, no
+# network. Repoint it at Groq or OpenRouter and they work unchanged.
 OPENAI_BASE_URL = os.environ.get(
     "OPENAI_BASE_URL", "http://localhost:11434/v1"
 ).rstrip("/")
-# Local servers ignore this, but cloud providers require it.
+# Ollama ignores this; a cloud endpoint requires it. The default is a
+# placeholder rather than empty, so the request is well-formed either way
+# and a local user never has to set anything.
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "ollama")
 
 # Context window requested from the model. Ollama's own default is 4096,
@@ -192,9 +182,8 @@ MAX_FILE_BYTES = int(os.environ.get("AGENT_MAX_FILE_BYTES", "512000"))
 
 # Ceiling on the whole conversation sent to the model, in characters.
 # Every step adds a tool result, so without this a 20-step run asks for
-# ~20000 tokens and overflows a local model's 8K window around step 6.
-# Gemini's context is large enough not to care, which is exactly why this
-# needs testing against the local provider and not just the cloud one.
+# ~20000 tokens and overflows an 8K window around step 6. The limit is
+# what keeps a long run inside one window rather than dying at step 6.
 #
 # Roughly 4 characters per token, so 24000 leaves a 6K budget inside an
 # 8192 window once the tool schemas and the reply are accounted for.
@@ -243,24 +232,3 @@ HISTORY_ENABLED = os.environ.get("AGENT_NO_HISTORY", "0") != "1"
 # which sorts chronologically without reading any of them.
 MAX_HISTORY_RUNS = int(os.environ.get("AGENT_MAX_HISTORY_RUNS", "200"))
 
-# The placeholder value shipped in .env.example. If we see it, the user
-# copied the example file but never filled in a real key.
-_PLACEHOLDER_KEY = "your_key_here"
-
-
-def get_api_key() -> str:
-    """Return the Gemini API key from the environment.
-
-    The key is only ever read here and handed straight to the SDK. It is
-    never logged or printed.
-
-    Raises:
-        RuntimeError: if the key is missing or still the placeholder value.
-    """
-    key = os.environ.get("GEMINI_API_KEY", "").strip()
-    if not key or key == _PLACEHOLDER_KEY:
-        raise RuntimeError(
-            "GEMINI_API_KEY is not set. Copy .env.example to .env, put your "
-            "key in it, and try again."
-        )
-    return key

@@ -253,11 +253,13 @@ def test_a_failed_download_is_reported_not_raised(fake_ollama) -> None:
 # --- the settings file ------------------------------------------------------
 
 
-def test_settings_name_the_provider_and_the_model(tmp_path: Path) -> None:
+def test_settings_name_the_model(tmp_path: Path) -> None:
+    """The provider is not written because there is only one and a setting
+    that cannot take another value is not a setting."""
     target = setup.write_settings("granite4.1:8b", config_dir=tmp_path)
     body = target.read_text()
-    assert "AGENT_PROVIDER=openai" in body
     assert "AGENT_MODEL=granite4.1:8b" in body
+    assert "AGENT_PROVIDER" not in body
 
 
 def test_the_settings_file_is_actually_loadable(tmp_path: Path) -> None:
@@ -267,8 +269,8 @@ def test_the_settings_file_is_actually_loadable(tmp_path: Path) -> None:
 
     target = setup.write_settings("granite4.1:8b", config_dir=tmp_path)
     values = dotenv_values(target)
-    assert values["AGENT_PROVIDER"] == "openai"
     assert values["AGENT_MODEL"] == "granite4.1:8b"
+    assert set(values) == {"AGENT_MODEL"}
 
 
 def test_the_written_settings_point_at_the_right_file(tmp_path: Path) -> None:
@@ -523,10 +525,17 @@ def test_every_command_the_agent_tells_users_to_type_actually_works() -> None:
     command that errors out. The same mistake was in the header of the
     settings file setup writes, which is a file people read and edit.
 
-    Scanned across `setup.py` rather than one string, because these are
-    exactly the places a name is typed by hand rather than derived, and
-    they are invisible to any test that only checks behaviour.
+    The first version of this test could not have caught it: the pattern
+    required a dash after `marth `, so `marth setup` produced no match at
+    all and was simply never examined. It now takes any token that starts
+    with a letter or a dash, which admits both a real flag and a wrong
+    one. Tokens that start with something else, such as the elided
+    `marth ...` in a docstring, are prose and are skipped.
+
+    Scanned across the whole package rather than one file, because a
+    command is typed by hand wherever the string happens to live.
     """
+    from agent import __path__ as package_path
     from agent.main import build_parser
 
     known = {
@@ -534,9 +543,13 @@ def test_every_command_the_agent_tells_users_to_type_actually_works() -> None:
         for action in build_parser()._actions
         for option in action.option_strings
     }
-    source = Path(setup.__file__).read_text()
-    mentioned = set(re.findall(r"marth (--?[a-z][a-z-]*)", source))
-    assert mentioned, "setup.py should tell the user how to re-run it"
+    modules = [
+        path for root in package_path for path in sorted(Path(root).glob("*.py"))
+    ]
+    source = "\n".join(path.read_text() for path in modules)
+
+    mentioned = set(re.findall(r"marth ([A-Za-z-][A-Za-z0-9-]*)", source))
+    assert mentioned, "the package should tell the user how to re-run it"
 
     unknown = mentioned - known - {"-h", "--help"}
-    assert not unknown, f"setup.py names commands that do not exist: {unknown}"
+    assert not unknown, f"the package names commands that do not exist: {unknown}"

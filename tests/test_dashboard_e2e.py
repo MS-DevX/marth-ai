@@ -302,8 +302,13 @@ def _drain(fd: int) -> bytes:
 
 
 def _looks_finished(output: bytearray) -> bool:
-    """Return whether the agent has printed its summary."""
-    return b"steps," in output or b"Configuration error" in output
+    """Return whether the agent has printed its summary.
+
+    Only a run that got far enough to finish has a summary. A run that
+    fails instead prints an explanation and exits, and the read loop sees
+    that as EOF, so there is no marker worth waiting for on that path.
+    """
+    return b"steps," in output
 
 
 def _reap(pid: int, fd: int) -> None:

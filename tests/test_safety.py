@@ -80,28 +80,28 @@ def test_falls_back_to_the_configured_workspace_root(
 
 
 def test_env_file_is_blocked(tmp_path: Path) -> None:
-    (tmp_path / ".env").write_text("GEMINI_API_KEY=secret")
+    (tmp_path / ".env").write_text("OPENAI_API_KEY=secret")
     with pytest.raises(safety.SecretFileError):
         safety.resolve_path(".env", tmp_path)
 
 
 def test_env_file_is_blocked_by_absolute_path(tmp_path: Path) -> None:
     """Reaching the file by a different route must not help."""
-    (tmp_path / ".env").write_text("GEMINI_API_KEY=secret")
+    (tmp_path / ".env").write_text("OPENAI_API_KEY=secret")
     with pytest.raises(safety.SecretFileError):
         safety.resolve_path(tmp_path / ".env", tmp_path)
 
 
 def test_env_file_is_blocked_from_a_subdirectory(tmp_path: Path) -> None:
     """The check runs on the resolved name, so `../` cannot rename it."""
-    (tmp_path / ".env").write_text("GEMINI_API_KEY=secret")
+    (tmp_path / ".env").write_text("OPENAI_API_KEY=secret")
     (tmp_path / "agent").mkdir()
     with pytest.raises(safety.SecretFileError):
         safety.resolve_path("agent/../.env", tmp_path)
 
 
 def test_secret_block_is_case_insensitive(tmp_path: Path) -> None:
-    (tmp_path / ".ENV").write_text("GEMINI_API_KEY=secret")
+    (tmp_path / ".ENV").write_text("OPENAI_API_KEY=secret")
     with pytest.raises(safety.SecretFileError):
         safety.resolve_path(".ENV", tmp_path)
 
@@ -125,7 +125,7 @@ def test_known_credential_files_are_blocked(tmp_path: Path, name: str) -> None:
 @pytest.mark.parametrize("name", [".env.example", ".env.sample", ".env.template"])
 def test_env_templates_are_still_readable(tmp_path: Path, name: str) -> None:
     """The committed template documents the variables and holds no secrets."""
-    (tmp_path / name).write_text("GEMINI_API_KEY=your_key_here")
+    (tmp_path / name).write_text("OPENAI_API_KEY=your_key_here")
     assert safety.resolve_path(name, tmp_path) == (tmp_path / name).resolve()
 
 
@@ -137,7 +137,7 @@ def test_a_file_merely_containing_env_is_not_blocked(tmp_path: Path) -> None:
 
 def test_secret_error_does_not_leak_the_path_outside(tmp_path: Path) -> None:
     """The message names the file but not its contents."""
-    (tmp_path / ".env").write_text("GEMINI_API_KEY=super-secret-value")
+    (tmp_path / ".env").write_text("OPENAI_API_KEY=super-secret-value")
     with pytest.raises(safety.SecretFileError) as caught:
         safety.resolve_path(".env", tmp_path)
     assert "super-secret-value" not in str(caught.value)

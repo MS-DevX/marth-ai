@@ -11,14 +11,16 @@ feeds the results back, looping until the task is done.
 ## Tech rules
 
 - Python 3.11+, standard library first.
-- Allowed dependencies: `google-genai`, `python-dotenv`, `pytest`. Ask
-  before adding anything else.
+- Allowed dependencies: `python-dotenv`, `pytest`. Ask before adding
+  anything else.
 - No agent frameworks (no LangChain, no OpenAI Agents SDK). The loop must
   stay visible and hand-written.
 - Type hints and short docstrings on every function. Small functions,
   clear names.
-- The API key comes from the `GEMINI_API_KEY` environment variable, loaded
-  from `.env`. Never hardcode a key and never print one.
+- No API key is needed by default: the model runs locally. A key is read
+  from `OPENAI_API_KEY` in `.env` only when `OPENAI_BASE_URL` has been
+  repointed at a server that wants one. Never hardcode a key and never
+  print one.
 - The model name is a config value (default lives in `config.py`). Never
   hardcode it anywhere else. A model can be listed by the API and still
   be overloaded on use, so a 503 on one model is not a bug in this code —
@@ -26,16 +28,18 @@ feeds the results back, looping until the task is done.
 - Retry only failures that clear on their own: 429 and 5xx. Never retry a
   400, 401, 403 or 404; they will fail identically and the wait is pure
   cost to the user.
-- Check the current google-genai docs for function calling instead of
-  guessing the API. Model names drift: check
+- Check the current OpenAI-compatible chat-completions docs for function
+  calling instead of guessing the shape. Model names drift: check
   `python -m agent.main --list-models` before changing the default, since a
   model can be listed yet still be rejected on use.
 - The LLM call lives behind a small interface in `llm.py` so the provider
-  can be swapped later. Nothing outside `llm.py` may import `google.genai`
-  or make HTTP calls itself.
-- Two providers ship: `GeminiLLM` (google-genai SDK) and `OpenAICompatLLM`
-  (stdlib `urllib`, for Ollama/Groq/OpenRouter). Select with
-  `AGENT_PROVIDER`. Do not add a third without agreeing first.
+  can be swapped later. Nothing outside `llm.py` may import an LLM SDK or
+  make HTTP calls itself. A test scans the package for that.
+- One provider ships: `OpenAICompatLLM`, built on stdlib `urllib`, which is
+  how the agent reaches a local Ollama server. There is deliberately no
+  `AGENT_PROVIDER` setting — a setting that cannot take a second value is
+  not a setting, and the old one silently fell through to Gemini on a typo.
+  Do not add another provider without agreeing first.
 
 ## Structure
 
@@ -51,7 +55,7 @@ marth-ai/
     __init__.py       __version__, read by pyproject at build time
     main.py           CLI entry: read task, run loop, print a summary
     loop.py           the agent loop
-    llm.py            provider boundary: Gemini + OpenAI-compatible
+    llm.py            provider boundary: the OpenAI-compatible client
                       + OllamaModels, the local model manager
     setup.py          `marth --setup`: check for Ollama, fetch the model
     tools.py          tool functions + tool schemas
@@ -76,6 +80,7 @@ marth-ai/
     test_history.py
     test_history_cli.py
     test_report.py
+    test_cli.py       what the CLI says when something goes wrong
     test_tui.py
     test_dashboard_e2e.py
     test_config.py     where the agent looks, installed vs checkout
@@ -194,10 +199,11 @@ wrong rather than loudly broken:
 - nothing else. Do not add a third `if is_checkout` without a reason.
 
 The `.env` is loaded in `config`, at import, **above** the values that
-read it. `PROVIDER` is read a few lines below the load, so loading it in
-`main()` instead is a silent no-op: the file is read too late to matter.
-`load_dotenv` is called without `override=True`, so a real environment
-variable always wins and a one-off override needs no file edit.
+read it. `MODEL_NAME` is read a few lines below the load, so loading it
+in `main()` instead is a silent no-op: the file is read too late to
+matter. `load_dotenv` is called without `override=True`, so a real
+environment variable always wins and a one-off override needs no file
+edit.
 
 ## Installing a model
 
@@ -206,8 +212,8 @@ checks, in order, because each failure has a different fix: the `ollama`
 binary, then a server, then the model.
 
 The HTTP is in `llm.OllamaModels`, not in `setup.py`, like everything
-else that talks to a provider. It is not a third LLM provider — it never
-sees a prompt and implements no part of the `LLM` protocol.
+else that talks to the server. It is not a provider — it never sees a
+prompt and implements no part of the `LLM` protocol.
 
 Three things in here were bugs before they were code, so do not undo
 them:
@@ -231,9 +237,8 @@ and stops.
 ## The system prompt
 
 `agent/prompt.py` holds it, prepended to the task rather than sent as a
-system role: Gemini takes its prompt in a config field and the
-OpenAI-compatible shape takes it as a message, so prepending is the one
-form both cannot silently drop.
+system role. The shape takes a system message, but prepending is the one
+form a server cannot silently drop: it arrives as ordinary user text.
 
 Every line must answer a failure that actually happened. If a rule no
 longer prevents anything real, delete the rule rather than keeping it
@@ -250,15 +255,15 @@ worth updating deliberately rather than deleting when it fails.
   (`.env`, `*.pem`, `id_rsa`, ...), with committed templates like
   `.env.example` explicitly exempt. Do not rely on the model choosing
   to refuse: a file it reads can contain instructions aimed at it, and
-  the API key is the one file worth stealing.
+  a key file is the one thing worth stealing.
 - Tool output is truncated to `MAX_OUTPUT_CHARS` in `loop.py`, at the one
   point where results enter the conversation. Keep it there. A per-tool
   cap is only as good as the next tool added.
 - The whole conversation is re-sent every step, so `loop.py` compacts it
   by dropping the oldest *tool results*. Never drop prose, and never drop
   the most recent result: that is what the model is currently reasoning
-  about. Develop this against a local model. Gemini's 1M context hides
-  every overflow bug in the design.
+  about. The default model has an 8K window, so an overflow shows up
+  within a normal task rather than being hidden by a huge context.
 - `write_file`, `edit_file`, and `run_command` require an explicit y/n
   confirmation that shows exactly what will happen: a diff for edits, the
   full command for shell.

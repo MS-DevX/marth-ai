@@ -137,6 +137,28 @@ def test_the_readme_documents_the_setup_step() -> None:
     assert "marth --setup" in readme
 
 
+def usage_block() -> str:
+    """Return the README's Usage section, up to the next `## ` heading.
+
+    Bounded by the next heading rather than by a named one, so renaming or
+    reordering the sections after Usage cannot make these tests read the
+    wrong part of the file.
+
+    Returns:
+        The Usage section as markdown.
+
+    Raises:
+        ValueError: if the README has no Usage section at all, which would
+            itself be a documentation failure worth failing loudly for.
+    """
+    readme = (REPO_ROOT / "README.md").read_text()
+    start = readme.index("## Usage")
+    end = readme.find("\n## ", start + 1)
+    if end == -1:
+        end = len(readme)
+    return readme[start:end]
+
+
 def test_every_documented_marth_flag_exists() -> None:
     """A renamed flag would leave the README telling people to type
     something that errors out.
@@ -148,8 +170,7 @@ def test_every_documented_marth_flag_exists() -> None:
 
     from agent.main import build_parser
 
-    readme = (REPO_ROOT / "README.md").read_text()
-    usage = readme[readme.index("## Usage") : readme.index("## Providers")]
+    usage = usage_block()
 
     documented = set(re.findall(r"\bmarth (--[a-z][a-z-]*)", usage))
     assert documented, "no marth flags found in the Usage section"
@@ -170,8 +191,7 @@ def test_the_usage_block_covers_every_action_flag() -> None:
 
     from agent.main import build_parser
 
-    readme = (REPO_ROOT / "README.md").read_text()
-    usage = readme[readme.index("## Usage") : readme.index("## Providers")]
+    usage = usage_block()
 
     documented = set(re.findall(r"\bmarth (--[a-z][a-z-]*)", usage))
     undocumented = {

@@ -4,8 +4,8 @@ A small terminal coding agent, written from scratch so the loop is visible.
 
 You type a task, it calls an LLM, the LLM asks for tools (read a file, run
 a command), the agent runs them and feeds the results back, repeating until
-the task is done. No agent frameworks — just the Gemini SDK and the standard
-library.
+the task is done. No agent frameworks — just the standard library. The
+model runs locally under Ollama, so there is no API key and no quota.
 
 ## Install
 
@@ -20,8 +20,8 @@ is ready and fixes it if not.
 `--setup` looks for [Ollama](https://ollama.com), asks its server what
 models it already holds, and downloads the recommended one
 (`granite4.1:8b`, about 5GB) only if it is missing. It then writes your
-provider and model to `~/.config/marth-ai/.env`, which is what makes a
-bare `marth` work with no flags and no key.
+model to `~/.config/marth-ai/.env`, which is what makes a bare `marth`
+work with no flags and no key.
 
 ```bash
 marth "explain what this repo does"
@@ -32,8 +32,9 @@ as its sandbox, so `cd` into a project first. Point it elsewhere with
 `AGENT_WORKSPACE=/path/to/repo`.
 
 Already have Ollama and a model? `--setup` says so and downloads nothing.
-Prefer the cloud? Skip `--setup` and set a key instead — see
-[Providers](#providers).
+Prefer to run somewhere else? The agent speaks the OpenAI HTTP API, so it
+works against any server of that shape — see
+[Pointing it at another server](#pointing-it-at-another-server).
 
 To upgrade:
 
@@ -250,20 +251,21 @@ have it use `grep`.
 **A local model is wrong in a specific way.** 8B models drop entries
 from directory listings, miscount truncated files, and call tools that
 do not exist. `granite4.1:8b` was noticeably more accurate than
-`lfm2.5:8b` on the same tasks. A cloud model makes these far rarer, at
-the cost of a daily quota.
+`lfm2.5:8b` on the same tasks. A larger model — local or pointed at a
+remote server — makes these far rarer, at the cost of time or money.
 
-## Using the cloud instead
+## Pointing it at another server
 
-`marth --setup` sets up a local model, because that needs no key and no
-quota. To use Gemini instead, get a key from
-<https://aistudio.google.com/apikey> and put it in the settings file:
+`marth --setup` points the agent at your local Ollama server, because that
+needs no key and no quota. Nothing about that is hardcoded: the agent
+speaks the OpenAI HTTP API, so any server that speaks it works too.
 
 ```bash
 mkdir -p ~/.config/marth-ai
 cat > ~/.config/marth-ai/.env <<'EOF'
-AGENT_PROVIDER=gemini
-GEMINI_API_KEY=your_actual_key
+OPENAI_BASE_URL=https://api.example.com/v1
+OPENAI_API_KEY=your_actual_key
+AGENT_MODEL=their-model-name
 EOF
 ```
 
@@ -271,11 +273,12 @@ A real environment variable always beats the file, so a one-off override
 needs no editing at all:
 
 ```bash
-AGENT_MODEL=gemini-3.1-flash-lite marth "what does this do"
+AGENT_MODEL=other-model marth "what does this do"
 ```
 
-The key is only ever read from the environment and handed to the SDK — it
-is never printed, and never written to a run log.
+The key is only ever read from the environment and handed to the one
+module that makes HTTP calls — it is never printed, and never written to
+a run log.
 
 ## Usage
 
@@ -286,10 +289,10 @@ python -m agent.main "explain what this repo does"
 # Or get prompted for the task
 python -m agent.main
 
-# Use a different model
-marth --model gemini-3.1-flash-lite "hello"
+# Use a model other than the default
+marth --model qwen2.5:1.5b "hello"
 
-# See which models your key can use
+# See which models the server has downloaded
 marth --list-models
 
 # Check the machine is ready, downloading a local model if not
@@ -313,41 +316,39 @@ marth --run 20260930-141203-a7f1
 
 # Do not write a run log at all
 marth --no-history "explain what this repo does"
-
-# Run entirely on a local model via Ollama (no API key, no rate limit)
-AGENT_PROVIDER=openai marth "explain what this repo does"
 ```
 
 From a checkout, use `python -m agent.main` in place of `marth`. Every
-run prints the workspace, provider, and model it is using, so the sandbox
-scope and the target are always visible.
+run prints the workspace, the server URL, and the model it is using, so
+the sandbox scope and the target are always visible.
 
-## Providers
+## Running the model
 
-The LLM call sits behind one small interface in `agent/llm.py`, so the
-provider is a config value. Two implementations ship:
+The LLM call sits behind one small interface in `agent/llm.py`, so what
+the agent talks to is a config value rather than a code change. One
+provider ships:
 
-| `AGENT_PROVIDER` | Backend | Needs | Notes |
+| What | How | Needs | Notes |
 | --- | --- | --- | --- |
-| `gemini` (default) | Gemini API | `GEMINI_API_KEY` | Free tier is rate limited |
-| `openai` | Ollama, or any OpenAI-compatible API | nothing locally | No rate limit; slower on CPU |
+| Ollama, local (default) | `OPENAI_BASE_URL=http://localhost:11434/v1` | nothing | No key, no quota; slower on CPU |
+| Any OpenAI-compatible server | change `OPENAI_BASE_URL` | a key, usually | Groq, OpenRouter, and similar |
 
-### Running fully local with Ollama
+### Running locally with Ollama
 
 `marth --setup` does all of this for you. By hand:
 
 ```bash
 ~/.local/opt/ollama/bin/ollama serve &        # if it is not already running
 
-marth --setup --model granite4.8b             # downloads it if missing
+marth --setup --model granite4.1:8b           # downloads it if missing
 
 marth "list the files in agent/"
 ```
 
-`granite4.1:8b` is what setup installs, because it was verified to drive
-the write tools through a real edit-and-command task. `lfm2.5:8b` is the
-other local default and is built specifically for tool calling. Only one
-model is held in memory at a time.
+`granite4.1:8b` is what setup installs, and also what a bare `marth`
+runs, because it was verified to drive the write tools through a real
+edit-and-command task. One name is used for both on purpose: when the two
+could differ, setup could install a model the agent would not use.
 
 Setup will not install Ollama itself. It is a large third-party program on
 your `PATH`, and that is a decision for you to make, not for an installer
@@ -367,8 +368,7 @@ environment variables (see `.env.example`):
 
 | Variable | Default | Meaning |
 | --- | --- | --- |
-| `AGENT_PROVIDER` | `gemini` | `gemini` or `openai` (Ollama/Groq/etc) |
-| `AGENT_MODEL` | per provider | Model name |
+| `AGENT_MODEL` | `granite4.1:8b` | Model name. Also what `--setup` installs |
 | `AGENT_MAX_STEPS` | `20` | Max loop iterations |
 | `AGENT_MAX_HISTORY_CHARS` | `24000` | Ceiling on the whole conversation |
 | `AGENT_MAX_REPEATED_CALLS` | `3` | Identical tool calls before giving up |
@@ -378,7 +378,7 @@ environment variables (see `.env.example`):
 | `AGENT_WORKSPACE` | the current directory | The only directory the agent may touch |
 | `AGENT_CONFIG_DIR` | `~/.config/marth-ai` | Where the settings file is read from and written to |
 | `OPENAI_BASE_URL` | `http://localhost:11434/v1` | OpenAI-compatible endpoint |
-| `OPENAI_API_KEY` | `ollama` | Ignored locally; required by cloud providers |
+| `OPENAI_API_KEY` | `ollama` | Ignored by a local server; required by a remote one |
 | `AGENT_CONTEXT_TOKENS` | `8192` | Context window requested |
 | `AGENT_THINKING` | `0` | Set to `1` to see hybrid-model reasoning traces |
 | `AGENT_TIMEOUT` | `300` | Per-request timeout; local models are slow |
@@ -502,7 +502,8 @@ marth-ai/
   agent/
     main.py          CLI entry: read task, run loop, print a summary
     loop.py          the agent loop + the tool-output truncation choke point
-    llm.py           provider boundary: Gemini + OpenAI-compatible
+    llm.py           provider boundary: the OpenAI-compatible client
+                     and OllamaModels, the local model manager
     setup.py         `marth --setup`: check for Ollama, fetch the model
     tools.py         tool functions + tool schemas
     safety.py        path sandbox, secret blocking, truncation, confirmations
@@ -526,6 +527,7 @@ marth-ai/
     test_history.py
     test_history_cli.py
     test_report.py
+    test_cli.py      what the CLI says when something goes wrong
     test_tui.py
     test_dashboard_e2e.py
     test_config.py    where the agent looks for things, installed vs checkout
@@ -555,7 +557,7 @@ does is not a test.
 
 ## Roadmap
 
-- [x] Phase 1 — scaffold, config, one-shot Gemini call
+- [x] Phase 1 — scaffold, config, one-shot model call
 - [x] Phase 2 — `read_file` + `list_files` and one tool round trip
 - [x] Phase 3 — the full agent loop
 - [x] Phase 4 — `write_file`, `edit_file`, `grep`, `run_command` + confirmations
@@ -571,10 +573,10 @@ no multi-agent anything, and no web access.
 ## How the model is told what to do
 
 `agent/prompt.py` holds the system prompt. It is prepended to the task
-rather than sent as a separate system role, because Gemini takes its
-system prompt in a config field and the OpenAI-compatible shape takes
-it as a message; prepending works identically on both and cannot be
-silently dropped by a provider that ignores it.
+rather than sent as a separate system role. The OpenAI-compatible shape
+does take a system message, but prepending works with any shape that
+takes a user message, and cannot be silently dropped by a server that
+ignores a field it does not recognise.
 
 Every line in it answers a failure that actually happened while
 building this agent:
@@ -627,8 +629,9 @@ minutes.
 
 The whole conversation is re-sent every step, so it has to stay bounded.
 Twenty steps of capped tool output is about 20,000 tokens, which overflows
-a local model's 8K window around step 6. Gemini's window is large enough
-that it never notices, which is why this is developed against Ollama.
+an 8K window around step 6. That is not a hypothetical: it is what a
+normal task on the default model actually does, which is why the budget
+is a config value and not an optimisation.
 
 When the history exceeds `AGENT_MAX_HISTORY_CHARS`, the oldest **tool
 results** are replaced with a one-line placeholder. Prose is never
@@ -723,14 +726,12 @@ one thing the run was for. The model reads the exit code and both
 streams either way, so it acts on the real information rather than on a
 colour.
 
-## Rate limits
+## Rate limits and failures
 
-The Gemini free tier allows **20 requests per day** per model, and each
-loop step costs at least one, so a real agent loop exhausts it in a
-couple of minutes. The agent handles the failures itself rather than
-dying. Two kinds are waited out:
+Every request is retried only when the failure is one that clears on its
+own. Two kinds are waited out:
 
-- **429 per-minute rate limit** — the `retryDelay` the API returns is used
+- **429 rate limit** — the `retryDelay` the server returns is used
   verbatim, because the server knows better than we do how long to wait
 - **5xx overloaded** — no hint is given, so the wait doubles each attempt,
   up to 30 seconds
@@ -743,26 +744,27 @@ Everything else fails immediately, with an explanation and a next step:
   resets tomorrow.
 - **400 / 401 / 403 / 404** — fail the same way on attempt two, so retrying
   just makes the user wait for the same error.
+- **connection refused** — told to you as "start Ollama, then run
+  `marth --setup`", not as a stack trace.
 
 Set `AGENT_MAX_RETRIES` to `0` to disable retrying entirely.
 
-A busy free tier also means a model can be listed and still be overloaded
-at the moment you use it. If a specific model keeps returning 503, try
-another: `gemini-3.5-flash-lite` and `gemini-3.1-flash-lite` have been
-reliable where `gemini-3.5-flash` was not.
+A local server does not rate limit, but it can be busy: another program
+holding the model means a request queues behind it. A remote endpoint of
+the same shape does rate limit, and the retry above is what handles it.
 
-For unlimited testing, use the local provider instead.
+A model can be listed and still be rejected on use. If a specific model
+keeps returning 404, it is not downloaded — `marth --setup` fetches it,
+and `marth --list-models` shows what is already there.
 
-## A note on the Gemini role format
+## Checking llm.py before changing it
 
-Function results go back to Gemini under `role="user"`, not
-`role="tool"`. The API used to accept a `tool` role and no longer does;
-it answers `400 INVALID_ARGUMENT: Role 'tool' is not supported`, with no
-hint about what it wants instead. This was found by running the agent
-against the live endpoint during Phase 5, not by reading the docs — the
-published function-calling guide now leads with a newer Interactions API
-and no longer shows this request shape at all.
+The wire shape is not something to guess. Tool arguments have to arrive
+as a JSON *string* rather than an object, and a tool result has to quote
+the `tool_call_id` it answers; both produce a 400 that names neither
+field when they are wrong.
 
-Check `llm.py` against the current docs before changing it, and verify
-against a real request rather than trusting a snippet that happens to
-look plausible.
+Those two details were found by running the agent against a live server,
+not by reading a snippet that happened to look plausible. Check the
+current docs against `llm.py` before changing it, and verify with a real
+request.

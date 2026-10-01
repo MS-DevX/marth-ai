@@ -102,9 +102,10 @@ def compact_history(
     """Shrink old tool results until the conversation fits `budget`.
 
     The conversation is re-sent in full on every step, so it has to stay
-    bounded or a long run eventually asks the provider for more than it
-    can accept. Gemini's window is large enough to ignore this, which is
-    why a local model is the honest place to develop against.
+    bounded or a long run eventually asks the server for more than it can
+    accept. A local 8B model has a window small enough that this is not
+    theoretical: an 8k-token task hits it within a dozen steps, so an
+    overflow here is a bug the user sees, not one the provider hides.
 
     Older results are dropped first, for two reasons. They are the bulk
     of the conversation, and they are the ones the model has already read
@@ -187,23 +188,23 @@ def run_record(
         The same `Run` that was passed in, filled in.
     """
     # The prompt is prepended to the task rather than passed as a
-    # separate role. Gemini takes its system prompt in a config field
-    # rather than in the conversation, and the OpenAI-compatible shape
-    # takes it as a message; plumbing it per provider would mean the two
-    # paths could drift apart silently. Prepending works identically on
-    # both, and cannot be dropped by a provider that ignores it.
+    # separate role. Gemini, the previous provider, took its system prompt
+    # in a config field rather than in the conversation, and the
+    # OpenAI-compatible shape takes it as a message; plumbing it per
+    # provider meant the two paths could drift apart silently. Prepending
+    # worked on both, and cannot be dropped by a provider that ignores
+    # it.
     history: list[Message] = [
         Message(role="user", text=f"{prompt.SYSTEM_PROMPT}\n\nThe task: {task}")
     ]
     if record is None:
-        record = Run(task=task, model=llm.model_name, provider=config.PROVIDER)
+        record = Run(task=task, model=llm.model_name)
     else:
         # Filled in rather than replaced: the caller may already have
         # set fields the loop has no opinion about, such as the name of
         # the file the run is being written to.
         record.task = task
         record.model = llm.model_name
-        record.provider = config.PROVIDER
     seen: dict[str, int] = {}
 
     def notify() -> None:
@@ -264,7 +265,6 @@ def run_record(
                 role="model",
                 text=response.text,
                 tool_calls=response.tool_calls,
-                raw=response.raw,
             )
         )
         history.append(Message(role="tool", results=tuple(results)))

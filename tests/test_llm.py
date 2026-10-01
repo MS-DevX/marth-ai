@@ -5,6 +5,8 @@ are pure functions of their inputs, so they can be checked against canned
 payloads, which keeps the suite fast and usable offline.
 """
 
+from pathlib import Path
+
 import pytest
 
 from agent import config, llm
@@ -28,8 +30,8 @@ def test_user_turn_becomes_a_user_message() -> None:
 def test_model_tool_call_arguments_are_a_json_string() -> None:
     """OpenAI encodes arguments as a JSON string, not an object.
 
-    This is the single biggest difference from Gemini's shape, and getting
-    it wrong produces a validation error from the API.
+    Getting this wrong produces a validation error from the server, and
+    the error does not say which field was wrong.
     """
     history = [
         llm.Message(
@@ -397,14 +399,91 @@ def test_wait_is_capped(monkeypatch: pytest.MonkeyPatch) -> None:
 # --- provider selection ---------------------------------------------------
 
 
-def test_build_llm_follows_the_configured_provider(
+def test_build_llm_always_returns_the_one_provider() -> None:
+    """There is no switch left to get wrong.
+
+    There used to be, and it was a silent trap: an unrecognised
+    `AGENT_PROVIDER` fell through to the Gemini branch and produced a 404
+    about the *model*, which reads like a bug in the agent rather than a
+    typo in a setting. One backend cannot be configured wrong.
+    """
+    assert isinstance(llm.build_llm(), llm.OpenAICompatLLM)
+    assert isinstance(llm.build_llm("lfm2.5:8b"), llm.OpenAICompatLLM)
+
+
+def test_build_llm_points_at_the_configured_server(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(config, "PROVIDER", "openai")
-    assert isinstance(llm.build_llm(), llm.OpenAICompatLLM)
+    """The server is the one setting that can still be changed, so it is
+    the one worth checking is actually read."""
+    monkeypatch.setattr(config, "OPENAI_BASE_URL", "http://example.test:9999/v1")
+    assert llm.build_llm()._base_url == "http://example.test:9999/v1"
 
-    monkeypatch.setattr(config, "PROVIDER", "gemini")
-    assert isinstance(llm.build_llm(), llm.GeminiLLM)
+
+def test_no_gemini_class_is_left_behind() -> None:
+    """Removing a provider is only real if it is really gone.
+
+    The module docstring still names Gemini to say why it was dropped, so
+    grepping the source would find it; this asks the module itself.
+    """
+    assert "GeminiLLM" not in vars(llm)
+
+
+def _imported_names(code: str) -> list[str]:
+    """Return the module names one import statement names.
+
+    Args:
+        code: A single line of Python, already stripped of its comment.
+
+    Handles `import a.b`, `import a.b as c, d` and `from a.b import c`,
+    which is every form used in this project. Returns whole dotted names
+    so `urllib.parse` can be allowed while `urllib.request` is not.
+    """
+    if code.startswith("import "):
+        parts = [part.split(" as ")[0].strip() for part in code[7:].split(",")]
+    elif code.startswith("from "):
+        parts = [code[5:].split(" import ")[0].split(" as ")[0].strip()]
+    else:
+        return []
+    return [part for part in parts if part]
+
+
+# Whole modules that imply a network call, plus the two stdlib entry
+# points that do it. `urllib.parse` is deliberately absent: parsing a URL
+# reaches nothing.
+FORBIDDEN = {
+    "http",
+    "httpx",
+    "requests",
+    "google",
+    "urllib.request",
+    "urllib.error",
+}
+
+
+def test_nothing_outside_llm_talks_to_the_network() -> None:
+    """The boundary in llm.py is the whole design, and nothing enforced it.
+
+    Scans every module under `agent/` for an import that could reach the
+    network. `llm.py` is exempt because it *is* the boundary. Without this
+    a later feature could quietly add its own `urllib` call, and the
+    provider could then be swapped without anyone noticing the new one.
+    """
+    offenders: list[str] = []
+    package = Path(llm.__file__).parent
+    for path in sorted(package.glob("*.py")):
+        if path.name == "llm.py":
+            continue
+        for number, line in enumerate(path.read_text().splitlines(), 1):
+            code = line.split("#", 1)[0].strip()
+            if not code.startswith(("import ", "from ")):
+                continue
+            bad = sorted(set(_imported_names(code)) & FORBIDDEN)
+            if bad:
+                offenders.append(f"{path.name}:{number}: {code}")
+    assert not offenders, (
+        "only llm.py may import a network client:\n" + "\n".join(offenders)
+    )
 
 
 # --- daily quota ----------------------------------------------------------

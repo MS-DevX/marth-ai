@@ -103,7 +103,11 @@ class Run:
     Args:
         task: What the user asked for.
         model: The model that ran it.
-        provider: Which provider served it.
+        provider: Which provider served it. Defaults to "ollama" because
+            that is the only one there is now; it stays a field rather
+            than being deleted because history files already carry it, and
+            a run that recorded "openai" is a true fact about a run that
+            really happened.
         started: Unix time the run began.
         finished: Unix time it ended. 0 while it is still going.
         outcome: Why it ended. "running" until something is known.
@@ -115,7 +119,7 @@ class Run:
 
     task: str
     model: str = ""
-    provider: str = ""
+    provider: str = "ollama"
     started: float = field(default_factory=time.time)
     finished: float = 0.0
     outcome: Outcome | str = "running"

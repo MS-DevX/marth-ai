@@ -1,26 +1,30 @@
 """The LLM provider boundary.
 
-Nothing outside this module imports an LLM SDK. The rest of the project
-talks to the model through the `LLM` protocol, so changing provider means
-writing one new class here and changing one line in `build_llm`.
+Nothing outside this module talks to a model. The rest of the project
+goes through the `LLM` protocol, so the loop has no idea what is on the
+other end of the socket.
 
-Two implementations ship:
+One provider ships:
 
-  * `GeminiLLM`         - the Gemini API, via the google-genai SDK
-  * `OpenAICompatLLM`   - anything speaking the OpenAI HTTP API: Ollama
-                          locally, or Groq/OpenRouter in the cloud. Built on
-                          `urllib` from the standard library, so it adds no
-                          dependency.
+  * `OpenAICompatLLM` - anything speaking the OpenAI HTTP API. Ollama
+                        locally is the intended target; Groq or OpenRouter
+                        still work by repointing `OPENAI_BASE_URL`. Built
+                        on `urllib` from the standard library, so the
+                        agent ships with no SDK dependency at all.
 
-`OllamaModels` is also here, and is deliberately not a third provider: it
-does not implement `LLM` and never sees a conversation. It is the model
-manager `marth setup` uses to answer "is this model installed yet" and
-"download it if not", which is an HTTP call like any other and so has to
-live on this side of the boundary.
+Gemini was the other provider and has been removed. `google-genai` pulled
+in pydantic, httpx, requests, websockets and cryptography, none of which
+this agent used, and a local model costs nothing per call.
+
+`OllamaModels` is also here, and is not a second provider: it does not
+implement `LLM` and never sees a conversation. It is the model manager
+`marth --setup` uses to answer "is this model installed yet" and "download
+it if not", which is an HTTP call like any other and so has to live on
+this side of the boundary.
 
 The conversation is represented with the small dataclasses below rather
-than either SDK's own message types. That is the whole point of this
-module: the loop should not know or care who is on the other end.
+than any SDK's own message types. That is the whole point of this module:
+the loop should not know or care who is on the other end.
 """
 
 import json
@@ -30,12 +34,9 @@ import urllib.error
 import urllib.request
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Protocol
+from typing import Any, Protocol
 
 from . import config
-
-if TYPE_CHECKING:  # Imported for type checkers only, not at runtime.
-    from google import genai
 
 
 # --- Conversation model ---------------------------------------------------
@@ -65,38 +66,26 @@ class Message:
     """One turn in the conversation.
 
     A turn holds at most one thing, which keeps the translation to and from
-    the SDK's format straightforward:
+    the wire format straightforward:
 
       * role="user"  + text          what the human typed
       * role="model" + tool_calls    the model asking for tools
       * role="model" + text          the model's final answer
       * role="tool"  + results       what the tools returned
-
-    `raw` is an escape hatch for providers. The Gemini SDK attaches its own
-    `types.Content` to a model turn, and that object carries details the
-    constructors cannot rebuild (a function call's `id`, for one). We hand
-    it straight back on the next request instead of re-deriving it. It is
-    typed `Any` so this module stays the only one that knows what it is.
     """
 
     role: str
     text: str = ""
     tool_calls: tuple[ToolCall, ...] = ()
     results: tuple[ToolResult, ...] = ()
-    raw: Any = None
 
 
 @dataclass(frozen=True)
 class LLMResponse:
-    """What the model sent back: some text, and possibly tool calls.
-
-    `raw` is the provider's own content object, kept so the next request
-    can echo the model turn back byte-for-byte. See `Message.raw`.
-    """
+    """What the model sent back: some text, and possibly tool calls."""
 
     text: str = ""
     tool_calls: tuple[ToolCall, ...] = ()
-    raw: Any = None
 
 
 # --- Interface ------------------------------------------------------------
@@ -110,199 +99,25 @@ class LLM(Protocol):
         """Return the model this instance will send to."""
         ...
 
-    def send(self, history: list[Message]) -> LLMResponse:
-        """Send the conversation so far and return the model's reply."""
-        ...
-
-    def list_model_names(self) -> list[str]:
-        """Return the model names available to this API key."""
-        ...
-
-
-# --- Gemini implementation ------------------------------------------------
-
-
-class GeminiLLM:
-    """`LLM` implementation backed by the Gemini API (google-genai)."""
-
-    def __init__(self, model: str | None = None) -> None:
-        """Store the model name; the HTTP client is created on first use."""
-        self._model = model or config.MODEL_NAME
-        self._client: "genai.Client | None" = None
-
-    @property
-    def model_name(self) -> str:
-        """Return the model this instance sends to."""
-        return self._model
-
-    @property
-    def client(self) -> "genai.Client":
-        """Return the SDK client, creating it on first access.
-
-        Created lazily so that importing this module (for example from a
-        test) does not require an API key or even the SDK itself.
-        """
-        if self._client is None:
-            from google import genai  # imported here to keep startup cheap
-
-            self._client = genai.Client(api_key=config.get_api_key())
-        return self._client
-
-    def _build_contents(self, history: list[Message]) -> list:
-        """Translate our conversation into the SDK's Content objects.
-
-        The SDK does not accept our dataclasses, so this is the one place
-        that knows the shape Gemini expects.
-        """
-        from google.genai import types
-
-        contents: list = []
-        for message in history:
-            if message.role == "user":
-                contents.append(
-                    types.Content(
-                        role="user",
-                        parts=[types.Part.from_text(text=message.text)],
-                    )
-                )
-            elif message.role == "model" and message.tool_calls:
-                # Prefer the SDK's own content object. It preserves the
-                # function call `id`, which `Part.from_function_call`
-                # cannot be given, and which the API uses to pair a
-                # response with its call when a tool is called twice.
-                if message.raw is not None:
-                    contents.append(message.raw)
-                else:
-                    contents.append(
-                        types.Content(
-                            role="model",
-                            parts=[
-                                types.Part.from_function_call(
-                                    name=call.name, args=call.args
-                                )
-                                for call in message.tool_calls
-                            ],
-                        )
-                    )
-            elif message.role == "model":
-                contents.append(
-                    types.Content(
-                        role="model",
-                        parts=[types.Part.from_text(text=message.text)],
-                    )
-                )
-            elif message.role == "tool":
-                # Function results go back under role "user", not "tool".
-                # The API used to accept a "tool" role and no longer
-                # does: it answers `Role 'tool' is not supported`, with
-                # no hint that "user" is what it wants instead. Verified
-                # against the live endpoint, since the docs lead with the
-                # newer Interactions API and no longer show this shape.
-                parts = [
-                    types.Part.from_function_response(
-                        name=result.name,
-                        response={"result": result.content},
-                    )
-                    for result in message.results
-                ]
-                contents.append(types.Content(role="user", parts=parts))
-        return contents
-
-    def _build_tools(self, tool_schemas: list[dict] | None) -> list:
-        """Translate our JSON Schema tool descriptions into SDK Tools."""
-        if not tool_schemas:
-            return []
-
-        from google.genai import types
-
-        declarations = [
-            types.FunctionDeclaration(
-                name=schema["name"],
-                description=schema["description"],
-                parameters_json_schema=schema["parameters"],
-            )
-            for schema in tool_schemas
-        ]
-        return [types.Tool(function_declarations=declarations)]
-
-    def _read_response(self, response: Any) -> LLMResponse:
-        """Pull text and tool calls out of an SDK response.
-
-        The parts are walked by hand rather than reading `response.text`,
-        because `.text` complains when the turn mixes text with function
-        calls. A model often does both in one turn, and that is normal.
-        """
-        texts: list[str] = []
-        calls: list[ToolCall] = []
-
-        for candidate in response.candidates or []:
-            content = candidate.content
-            if content is None:
-                continue
-            for part in content.parts or []:
-                if part.function_call is not None:
-                    call = part.function_call
-                    calls.append(
-                        ToolCall(
-                            # Some models omit the id; the name is the
-                            # fallback pairing key.
-                            id=call.id or call.name,
-                            name=call.name,
-                            args=dict(call.args or {}),
-                        )
-                    )
-                elif part.text:
-                    texts.append(part.text)
-
-        raw = response.candidates[0].content if response.candidates else None
-        return LLMResponse(text="".join(texts), tool_calls=tuple(calls), raw=raw)
-
     def send(
-        self,
-        history: list[Message],
-        tool_schemas: list[dict] | None = None,
+        self, history: list[Message], tool_schemas: list[dict] | None = None
     ) -> LLMResponse:
         """Send the conversation so far and return the model's reply.
 
         Args:
-            history: Every turn so far, oldest first.
-            tool_schemas: Tools the model may call. If omitted, the model
-                can only reply with text.
-
-        Returns:
-            The model's text and any tool calls it requested.
+            history: The conversation so far, oldest first.
+            tool_schemas: The tools the model may call, or None for no
+                tools. The parameter exists on the protocol, not just on
+                the implementation, because the loop passes it: a class
+                written to the narrower signature would accept the call
+                at runtime only by accident of a default value, and would
+                silently never see a tool.
         """
-        from google.genai import types
-
-        generate_config = types.GenerateContentConfig(
-            tools=self._build_tools(tool_schemas),
-            # We run the tools ourselves so the loop stays visible, and
-            # so every tool call passes through the safety layer.
-            automatic_function_calling=types.AutomaticFunctionCallingConfig(
-                disable=True
-            ),
-        )
-
-        def request() -> Any:
-            return self.client.models.generate_content(
-                model=self._model,
-                contents=self._build_contents(history),
-                config=generate_config,
-            )
-
-        # The free tier allows only a handful of requests per minute, and a
-        # long agent loop will trip it. The API says how long to wait, so
-        # wait exactly that rather than failing the run.
-        return self._read_response(retry_on_rate_limit(request))
+        ...
 
     def list_model_names(self) -> list[str]:
-        """Return the model names available to this API key, sorted.
-
-        Names come back as `models/gemini-...`; the prefix is stripped so
-        they can be passed straight back to `--model`.
-        """
-        models = self.client.models.list()
-        return sorted(m.name.split("/")[-1] for m in models)
+        """Return the model names the server has."""
+        ...
 
 
 # --- Transient failures ---------------------------------------------------
@@ -431,9 +246,9 @@ def strip_thinking(text: str, has_tool_calls: bool = False) -> str:
 class OpenAICompatLLM:
     """`LLM` implementation for any OpenAI-shaped HTTP API.
 
-    Covers Ollama running locally (`AGENT_PROVIDER=openai`) and, by
-    changing `OPENAI_BASE_URL`, cloud providers such as Groq or OpenRouter.
-    Uses `urllib` from the standard library, so it adds no dependency.
+    Covers Ollama running locally and, by changing `OPENAI_BASE_URL`,
+    cloud providers such as Groq or OpenRouter. Uses `urllib` from the
+    standard library, so it adds no dependency.
     """
 
     def __init__(
@@ -454,9 +269,9 @@ class OpenAICompatLLM:
     def _build_messages(self, history: list[Message]) -> list[dict]:
         """Translate our conversation into OpenAI chat messages.
 
-        The shape differs from Gemini in two ways that matter: tool
-        arguments arrive as a JSON *string*, and a tool result has to
-        quote the id of the call it answers.
+        Two details of the shape matter: tool arguments arrive as a JSON
+        *string*, and a tool result has to quote the id of the call it
+        answers.
         """
         messages: list[dict] = []
         for message in history:
@@ -819,11 +634,19 @@ class _PullTally:
 
 
 def build_llm(model: str | None = None) -> LLM:
-    """Create the LLM named by `config.PROVIDER`.
+    """Create the LLM the agent talks to.
 
-    Switching provider is a one-word change: `AGENT_PROVIDER=openai` points
-    the whole agent at Ollama (or Groq, or OpenRouter) instead.
+    There is one provider now. It used to be a choice, and the choice was
+    a silent trap: an unrecognised `AGENT_PROVIDER` fell through to the
+    Gemini branch and produced a 404 about a *model*, which reads like a
+    bug in the agent rather than a typo in a setting. One backend cannot
+    be configured wrong.
+
+    Args:
+        model: The model to use, or None for the configured default.
+
+    Returns:
+        An `LLM` pointed at `config.OPENAI_BASE_URL`, which is a local
+        Ollama server unless someone deliberately repointed it.
     """
-    if config.PROVIDER == "openai":
-        return OpenAICompatLLM(model=model)
-    return GeminiLLM(model=model)
+    return OpenAICompatLLM(model=model)
